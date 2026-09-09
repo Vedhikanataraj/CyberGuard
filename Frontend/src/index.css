@@ -1,0 +1,1007 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+
+  color: #e8f0f2;
+  background: #07141b;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+
+  --destructive: oklch(0.577 0.245 27.325);
+
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+
+  --radius: 0.625rem;
+
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+/* =========================================================
+   GLOBAL
+========================================================= */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  width: 100%;
+}
+
+body {
+  min-width: 320px;
+
+  background:
+    radial-gradient(
+      circle at 85% 0%,
+      rgba(0, 140, 149, 0.08),
+      transparent 28%
+    ),
+    #07141b;
+
+  color: #e8f0f2;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::selection {
+  background: rgba(0, 140, 149, 0.35);
+  color: #ffffff;
+}
+
+/* =========================================================
+   SCROLLBAR
+========================================================= */
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #07141b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #17404a;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #008c95;
+}
+
+/* =========================================================
+   CYBERGUARD ANIMATIONS
+========================================================= */
+
+@keyframes cyber-pulse {
+  0%,
+  100% {
+    transform: translateX(-50%) scale(1);
+    opacity: 0.55;
+  }
+
+  50% {
+    transform: translateX(-50%) scale(1.15);
+    opacity: 0.8;
+  }
+}
+
+@keyframes floating-glow {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  50% {
+    transform: translate(50px, -30px);
+  }
+}
+
+@keyframes floating-glow-reverse {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  50% {
+    transform: translate(-50px, 30px);
+  }
+}
+
+@keyframes scan-line {
+  0% {
+    transform: translateY(-10vh);
+    opacity: 0;
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  90% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: translateY(110vh);
+    opacity: 0;
+  }
+}
+
+/* =========================================================
+   RETRO GRID
+========================================================= */
+
+@keyframes grid-move {
+  0% {
+    background-position: 0 0;
+  }
+
+  100% {
+    background-position: 70px 70px;
+  }
+}
+
+.animate-grid {
+  animation: grid-move 12s linear infinite;
+}
+
+/*
+   Slow, smooth RetroGrid animation
+   Used by the Velora RetroGrid component.
+*/
+
+@keyframes retro-grid-move {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+
+  to {
+    transform: translate3d(0, 56px, 0);
+  }
+}
+
+.animate-retro-grid {
+  animation: retro-grid-move 18s linear infinite;
+  will-change: transform;
+}
+
+/* =========================================================
+   GENERAL CYBER ANIMATIONS
+========================================================= */
+
+.animate-cyber-pulse {
+  animation: cyber-pulse 7s ease-in-out infinite;
+}
+
+.animate-floating-glow {
+  animation: floating-glow 10s ease-in-out infinite;
+}
+
+.animate-floating-glow-reverse {
+  animation: floating-glow-reverse 12s ease-in-out infinite;
+}
+
+.animate-scan-line {
+  animation: scan-line 7s linear infinite;
+}
+
+/* =========================================================
+   AMBIENT ATMOSPHERE
+========================================================= */
+
+.ambient-halo {
+  position: absolute;
+
+  width: 42vw;
+  height: 42vw;
+
+  min-width: 360px;
+  min-height: 360px;
+
+  border-radius: 999px;
+
+  filter: blur(110px);
+
+  opacity: 0.2;
+
+  will-change: transform;
+}
+
+.ambient-halo-left {
+  left: -20vw;
+  top: 15vh;
+
+  background: #4034a6;
+
+  animation: halo-drift 24s ease-in-out infinite;
+}
+
+.ambient-halo-right {
+  right: -20vw;
+  top: 34vh;
+
+  background: #215a74;
+
+  animation: halo-drift 30s ease-in-out infinite reverse;
+}
+
+.ambient-halo-bottom {
+  bottom: -33vw;
+  left: 35%;
+
+  background: #33257d;
+
+  animation: halo-drift 28s ease-in-out infinite 4s;
+}
+
+.ambient-particle {
+  position: absolute;
+
+  border-radius: 50%;
+
+  background: #d9d6ff;
+
+  opacity: 0;
+
+  box-shadow:
+    0 0 12px rgba(158, 147, 255, 0.6);
+
+  animation: particle-drift linear infinite;
+
+  will-change: transform, opacity;
+}
+
+.edge-trace {
+  position: absolute;
+
+  width: 24vw;
+  height: 1px;
+
+  opacity: 0.28;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(158, 147, 255, 0.8),
+      transparent
+    );
+
+  animation: trace-drift 13s ease-in-out infinite;
+}
+
+.edge-trace-left {
+  left: -8vw;
+  top: 22%;
+
+  transform: rotate(23deg);
+}
+
+.edge-trace-right {
+  right: -8vw;
+  top: 68%;
+
+  transform: rotate(-28deg);
+
+  animation-delay: -5s;
+}
+
+.edge-trace-bottom {
+  bottom: 13%;
+  left: 38%;
+
+  width: 18vw;
+
+  animation-delay: -8s;
+}
+
+/* =========================================================
+   ATMOSPHERE KEYFRAMES
+========================================================= */
+
+@keyframes halo-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  50% {
+    transform: translate3d(8vw, -4vh, 0) scale(1.12);
+  }
+}
+
+@keyframes particle-drift {
+  0%,
+  100% {
+    transform: translate3d(0, 12px, 0);
+    opacity: 0;
+  }
+
+  18%,
+  82% {
+    opacity: 0.45;
+  }
+
+  50% {
+    transform: translate3d(18px, -30px, 0);
+    opacity: 0.8;
+  }
+}
+
+@keyframes trace-drift {
+  0%,
+  100% {
+    opacity: 0.08;
+    transform: translateX(-16px);
+  }
+
+  50% {
+    opacity: 0.4;
+    transform: translateX(16px);
+  }
+}
+
+/* =========================================================
+   CYBERGUARD CINEMATIC MOTION SYSTEM
+========================================================= */
+
+/* =========================================
+   NETWORK LINES
+========================================= */
+
+.cyber-line {
+  stroke: rgba(49, 212, 219, 0.22);
+  stroke-width: 1;
+  stroke-dasharray: 5 15;
+
+  animation: cyber-flow 5s linear infinite;
+}
+
+.cyber-line.subtle {
+  stroke: rgba(49, 212, 219, 0.08);
+
+  animation-duration: 8s;
+}
+
+@keyframes cyber-flow {
+  from {
+    stroke-dashoffset: 0;
+  }
+
+  to {
+    stroke-dashoffset: -200;
+  }
+}
+
+/* =========================================
+   NETWORK NODES
+========================================= */
+
+.network-node {
+  position: relative;
+
+  transform: translate(-50%, -50%);
+
+  border-radius: 9999px;
+
+  background: #31d4db;
+
+  box-shadow:
+    0 0 8px rgba(49, 212, 219, 0.9),
+    0 0 25px rgba(49, 212, 219, 0.5);
+
+  animation: node-breathe 2.8s ease-in-out infinite;
+}
+
+.network-node::before {
+  content: "";
+
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  width: 22px;
+  height: 22px;
+
+  transform: translate(-50%, -50%);
+
+  border-radius: 9999px;
+
+  border: 1px solid rgba(49, 212, 219, 0.2);
+
+  animation: node-ring 2.8s ease-out infinite;
+}
+
+@keyframes node-breathe {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(0.7);
+    opacity: 0.35;
+  }
+
+  50% {
+    transform: translate(-50%, -50%) scale(1.3);
+    opacity: 1;
+  }
+}
+
+@keyframes node-ring {
+  0% {
+    width: 10px;
+    height: 10px;
+    opacity: 0.8;
+  }
+
+  100% {
+    width: 45px;
+    height: 45px;
+    opacity: 0;
+  }
+}
+
+/* =========================================
+   DATA PACKETS
+========================================= */
+
+.data-packet {
+  fill: #31d4db;
+
+  filter:
+    drop-shadow(0 0 6px rgba(49, 212, 219, 1))
+    drop-shadow(0 0 14px rgba(49, 212, 219, 0.8));
+}
+
+/* =========================================
+   CENTRAL CORE
+========================================= */
+
+@keyframes core-pulse {
+  0%,
+  100% {
+    transform: scale(0.94);
+
+    box-shadow:
+      0 0 25px rgba(49, 212, 219, 0.12),
+      0 0 70px rgba(49, 212, 219, 0.08);
+  }
+
+  50% {
+    transform: scale(1.05);
+
+    box-shadow:
+      0 0 35px rgba(49, 212, 219, 0.3),
+      0 0 100px rgba(49, 212, 219, 0.18);
+  }
+}
+
+.animate-core-pulse {
+  animation: core-pulse 2.5s ease-in-out infinite;
+}
+
+/* =========================================
+   ROTATING RINGS
+========================================= */
+
+@keyframes spin-slow {
+  from {
+    transform:
+      translate(-50%, -50%)
+      rotate(0deg);
+  }
+
+  to {
+    transform:
+      translate(-50%, -50%)
+      rotate(360deg);
+  }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 18s linear infinite;
+}
+
+@keyframes spin-reverse {
+  from {
+    transform:
+      translate(-50%, -50%)
+      rotate(360deg);
+  }
+
+  to {
+    transform:
+      translate(-50%, -50%)
+      rotate(0deg);
+  }
+}
+
+.animate-spin-reverse {
+  animation: spin-reverse 11s linear infinite;
+}
+
+/* =========================================
+   RADAR
+========================================= */
+
+.radar-ring {
+  animation: radar-expand 3s ease-out infinite;
+}
+
+@keyframes radar-expand {
+  0% {
+    transform:
+      translate(-50%, -50%)
+      scale(0.7);
+
+    opacity: 0.8;
+  }
+
+  70% {
+    opacity: 0.25;
+  }
+
+  100% {
+    transform:
+      translate(-50%, -50%)
+      scale(2);
+
+    opacity: 0;
+  }
+}
+
+/* =========================================
+   ATMOSPHERIC ORBS
+========================================= */
+
+.cyber-orb {
+  position: absolute;
+
+  border-radius: 9999px;
+
+  filter: blur(80px);
+
+  pointer-events: none;
+}
+
+.cyber-orb-one {
+  width: 260px;
+  height: 260px;
+
+  left: 8%;
+  top: 30%;
+
+  background: rgba(0, 140, 149, 0.08);
+
+  animation: orb-one 12s ease-in-out infinite;
+}
+
+.cyber-orb-two {
+  width: 300px;
+  height: 300px;
+
+  right: 5%;
+  top: 20%;
+
+  background: rgba(49, 212, 219, 0.07);
+
+  animation: orb-two 15s ease-in-out infinite;
+}
+
+.cyber-orb-three {
+  width: 220px;
+  height: 220px;
+
+  left: 45%;
+  bottom: 5%;
+
+  background: rgba(0, 140, 149, 0.08);
+
+  animation: orb-three 10s ease-in-out infinite;
+}
+
+@keyframes orb-one {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  50% {
+    transform: translate(100px, -80px);
+  }
+}
+
+@keyframes orb-two {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  50% {
+    transform: translate(-120px, 90px);
+  }
+}
+
+@keyframes orb-three {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+
+  50% {
+    transform: translate(80px, -60px);
+  }
+}
+
+/* =========================================
+   FLOATING SECURITY LABELS
+========================================= */
+
+.floating-security-label {
+  position: absolute;
+
+  display: flex;
+
+  align-items: center;
+
+  gap: 8px;
+
+  padding: 8px 12px;
+
+  border: 1px solid rgba(49, 212, 219, 0.12);
+
+  border-radius: 9999px;
+
+  background: rgba(3, 15, 19, 0.55);
+
+  backdrop-filter: blur(12px);
+
+  color: rgba(157, 177, 183, 0.6);
+
+  font-size: 8px;
+
+  font-weight: 700;
+
+  letter-spacing: 0.25em;
+
+  animation: floating-label 6s ease-in-out infinite;
+}
+
+.label-dot {
+  width: 5px;
+  height: 5px;
+
+  border-radius: 9999px;
+
+  background: #31d4db;
+
+  box-shadow: 0 0 10px #31d4db;
+}
+
+.label-one {
+  left: 8%;
+  top: 38%;
+
+  animation-delay: 0s;
+}
+
+.label-two {
+  right: 9%;
+  top: 32%;
+
+  animation-delay: 1.5s;
+}
+
+.label-three {
+  left: 15%;
+  bottom: 22%;
+
+  animation-delay: 3s;
+}
+
+.label-four {
+  right: 14%;
+  bottom: 20%;
+
+  animation-delay: 4.5s;
+}
+
+@keyframes floating-label {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-14px);
+  }
+}
+
+/* =========================================================
+   SHADCN / TAILWIND THEME
+========================================================= */
+
+@theme inline {
+  --font-heading: var(--font-sans);
+  --font-sans: 'Geist Variable', sans-serif;
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* =========================================================
+   DARK THEME
+========================================================= */
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+
+  --destructive: oklch(0.704 0.191 22.216);
+
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+/* =========================================================
+   BASE LAYER
+========================================================= */
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  html {
+    @apply font-sans;
+  }
+}
+
+/* =========================================================
+   REDUCED MOTION
+========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-halo,
+  .ambient-particle,
+  .edge-trace,
+  .animate-retro-grid,
+  .animate-grid,
+  .cyber-line,
+  .network-node,
+  .network-node::before,
+  .animate-core-pulse,
+  .animate-spin-slow,
+  .animate-spin-reverse,
+  .radar-ring,
+  .cyber-orb,
+  .floating-security-label {
+    animation: none !important;
+  }
+}
+/* =========================================================
+   CYBERGUARD PROFESSIONAL RETRO GRID
+========================================================= */
+
+.retro-grid-plane {
+  background-repeat: repeat;
+  background-position: 0 0;
+
+  animation:
+    retro-grid-forward
+    var(--retro-speed, 18s)
+    linear
+    infinite;
+
+  will-change: background-position;
+}
+
+@keyframes retro-grid-forward {
+  from {
+    background-position:
+      0 0;
+  }
+
+  to {
+    background-position:
+      0 64px;
+  }
+}
+
+
+/* =========================================================
+   SUBTLE SCAN
+========================================================= */
+
+.retro-scan-line {
+  top: 18%;
+
+  opacity: 0;
+
+  animation:
+    retro-scan
+    8s
+    ease-in-out
+    infinite;
+}
+
+@keyframes retro-scan {
+  0% {
+    top: 15%;
+    opacity: 0;
+  }
+
+  12% {
+    opacity: 0.15;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+
+  88% {
+    opacity: 0.12;
+  }
+
+  100% {
+    top: 85%;
+    opacity: 0;
+  }
+}
+
+
+/* =========================================================
+   REDUCED MOTION
+========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  .retro-grid-plane,
+  .retro-scan-line {
+    animation: none;
+  }
+}
