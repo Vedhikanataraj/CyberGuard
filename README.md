@@ -1,6 +1,6 @@
 # 🛡️ CyberGuard
 
-### Web & Network Security Assessment Platform
+## Web & Network Security Assessment Platform
 
 CyberGuard is a web-based cybersecurity assessment platform designed for authorized security testing. It combines network discovery, service detection, web security analysis, vulnerability assessment, risk evaluation, asset management, scan history, and security reporting into a centralized dashboard.
 
@@ -12,7 +12,7 @@ CyberGuard is a web-based cybersecurity assessment platform designed for authori
 
 ### 🔍 Full Security Scan
 
-Performs a broader security assessment of an authorized target.
+Performs a comprehensive security assessment of an authorized target.
 
 - Target validation
 - Network and service analysis
@@ -29,7 +29,7 @@ Performs a broader security assessment of an authorized target.
 
 ### 🌐 Web Security Scan
 
-Evaluates an authorized website or web application for security issues.
+Evaluates an authorized website or web application for potential security issues.
 
 Supports targets such as:
 
@@ -37,18 +37,3 @@ Supports targets such as:
 https://example.com
 http://127.0.0.1:8000
 https://authorized-domain.com
-
-### Step 2 — Save it
-
-Press:
-
-**Ctrl + S**
-
-Do **not** change any other project files.
-
-### Step 3 — Commit the README
-
-Go back to your PowerShell:
-
-```powershell
-cd C:\Users\jothi\OneDrive\Pictures\Desktop\cybergaurd
