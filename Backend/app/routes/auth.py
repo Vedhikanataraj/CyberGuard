@@ -261,7 +261,7 @@ def login(
         value=session_token,
         httponly=True,
         secure=COOKIE_SECURE,    # True when using HTTPS in production
-        samesite="lax",
+        samesite="none",
         max_age=60 * 60 * 24 * SESSION_DURATION_DAYS,
         path="/",
     )
