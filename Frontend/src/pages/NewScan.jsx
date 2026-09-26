@@ -145,13 +145,14 @@ const SCAN_TYPES = {
 
 export default function NewScan() {
   const [scanType, setScanType] = useState("full");
-  const [target, setTarget] = useState("127.0.0.1");
+  const [target, setTarget] = useState("");
   const [portRange, setPortRange] = useState("1-1000");
 
   const [scanning, setScanning] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [error, setError] = useState("");
+  const [targetError, setTargetError] = useState("");
 
   function getErrorMessage(data) {
     if (!data) return "Scan request failed.";
@@ -183,14 +184,77 @@ export default function NewScan() {
 
     if (!trimmed) return "Please enter a target.";
 
-    // Allows:
-    // 127.0.0.1
-    // 192.168.1.10
-    // example.com
-    // http://example.com
-    // https://example.com/path
+    let hostname = trimmed;
+
+    try {
+      const parsed = new URL(
+        /^https?:\/\//i.test(trimmed)
+          ? trimmed
+          : `http://${trimmed}`
+      );
+
+      hostname = parsed.hostname.toLowerCase();
+    } catch {
+      return "Enter a valid IP address, hostname, or URL.";
+    }
+
+    // --------------------------------------------------------
+    // Block local/private hostnames
+    // --------------------------------------------------------
+    if (
+      hostname === "localhost" ||
+      hostname.endsWith(".localhost") ||
+      hostname.endsWith(".local")
+    ) {
+      return "Private/local hostname cannot be scanned.";
+    }
+
+    // --------------------------------------------------------
+    // Block private, loopback, link-local and reserved IPv4
+    // --------------------------------------------------------
+    const ipv4Match = hostname.match(
+      /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/
+    );
+
+    if (ipv4Match) {
+      const octets = ipv4Match.slice(1).map(Number);
+
+      if (octets.some((octet) => octet > 255)) {
+        return "Enter a valid IP address.";
+      }
+
+      const [a, b] = octets;
+
+      if (a === 10) {
+        return "Private IP cannot be scanned.";
+      }
+
+      if (a === 172 && b >= 16 && b <= 31) {
+        return "Private IP cannot be scanned.";
+      }
+
+      if (a === 192 && b === 168) {
+        return "Private IP cannot be scanned.";
+      }
+
+      if (a === 127) {
+        return "Private/local IP cannot be scanned.";
+      }
+
+      if (a === 169 && b === 254) {
+        return "Local link IP cannot be scanned.";
+      }
+
+      if (a === 0) {
+        return "Reserved IP cannot be scanned.";
+      }
+    }
+
+    // --------------------------------------------------------
+    // General target validation
+    // --------------------------------------------------------
     const targetPattern =
-      /^(https?:\/\/)?(([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}|localhost|(\d{1,3}\.){3}\d{1,3})(:\d{1,5})?(\/.*)?$/;
+      /^(https?:\/\/)?(([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}|(\d{1,3}\.){3}\d{1,3})(:\d{1,5})?(\/.*)?$/;
 
     if (!targetPattern.test(trimmed)) {
       return "Enter a valid IP address, hostname, or URL.";
@@ -229,12 +293,14 @@ export default function NewScan() {
   }
 
   async function startScan() {
-    const targetError = validateTarget(target);
+    const targetValidationError = validateTarget(target);
 
-    if (targetError) {
-      setError(targetError);
+    if (targetValidationError) {
+      setTargetError(targetValidationError);
       return;
     }
+
+    setTargetError("");
 
     if ((scanType === "full" || scanType === "ports") && !portRange.trim()) {
       setError("Please enter a port range.");
@@ -369,6 +435,7 @@ export default function NewScan() {
     setCompleted(false);
     setScanResult(null);
     setError("");
+    setTargetError("");
   }
 
   function selectScanType(type) {
@@ -376,19 +443,7 @@ export default function NewScan() {
     setCompleted(false);
     setScanResult(null);
     setError("");
-
-    if (type === "web") {
-      if (
-        target === "127.0.0.1" ||
-        target === "192.168.1.10"
-      ) {
-        setTarget("http://127.0.0.1:8000");
-      }
-    }
-
-    if (type !== "web" && target === "http://127.0.0.1:8000") {
-      setTarget("127.0.0.1");
-    }
+    setTargetError(target.trim() ? validateTarget(target) : "");
   }
 
   const selected = SCAN_TYPES[scanType];
@@ -550,43 +605,44 @@ export default function NewScan() {
               <input
                 type="text"
                 value={target}
-                onChange={(event) =>
-                  setTarget(event.target.value)
-                }
+                onChange={(event) => {
+                  const value = event.target.value;
+                  setTarget(value);
+                  setTargetError(validateTarget(value));
+                  setError("");
+                }}
                 placeholder={
                   scanType === "web"
                     ? "https://example.com"
-                    : "127.0.0.1"
+                    : "Public IP, hostname or URL"
                 }
                 disabled={scanning}
-                className="mt-3 w-full rounded-lg border border-[#104A36] bg-[#04120E] px-4 py-3 text-sm text-white outline-none transition placeholder:text-[#426F5B] focus:border-[#00E39A] focus:ring-1 focus:ring-[#00E39A]/20 disabled:opacity-60"
+                aria-invalid={Boolean(targetError)}
+                className={`mt-3 w-full rounded-lg border bg-[#04120E] px-4 py-3 text-sm text-white outline-none transition placeholder:text-[#426F5B] disabled:opacity-60 ${
+                  targetError
+                    ? "border-red-500/60 focus:border-red-400 focus:ring-1 focus:ring-red-500/20"
+                    : "border-[#104A36] focus:border-[#00E39A] focus:ring-1 focus:ring-[#00E39A]/20"
+                }`}
               />
 
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => setTarget("127.0.0.1")}
-                  className="rounded-md border border-[#0B3B2B] bg-[#04120E] px-2.5 py-1 text-[10px] text-[#729B87] hover:text-white"
-                >
-                  127.0.0.1
-                </button>
+              {targetError && (
+                <div className="mt-2 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5">
+                  <AlertTriangle
+                    size={16}
+                    className="mt-0.5 shrink-0 text-red-400"
+                  />
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-red-300">
+                      Target cannot be scanned
+                    </p>
+                    <p className="mt-0.5 text-[11px] leading-5 text-red-400/90">
+                      {targetError}
+                    </p>
+                  </div>
+                </div>
+              )}
 
-                <button
-                  type="button"
-                  onClick={() => setTarget("192.168.1.10")}
-                  className="rounded-md border border-[#0B3B2B] bg-[#04120E] px-2.5 py-1 text-[10px] text-[#729B87] hover:text-white"
-                >
-                  192.168.1.10
-                </button>
 
-                <button
-                  type="button"
-                  onClick={() => setTarget("example.com")}
-                  className="rounded-md border border-[#0B3B2B] bg-[#04120E] px-2.5 py-1 text-[10px] text-[#729B87] hover:text-white"
-                >
-                  example.com
-                </button>
-              </div>
             </div>
 
             {(scanType === "full" || scanType === "ports") && (
@@ -643,11 +699,8 @@ export default function NewScan() {
               <button
                 type="button"
                 onClick={() => {
-                  setTarget(
-                    scanType === "web"
-                      ? "http://127.0.0.1:8000"
-                      : "127.0.0.1"
-                  );
+                  setTarget("");
+                  setTargetError("");
                   setPortRange("1-1000");
                   setError("");
                   setScanResult(null);
@@ -661,7 +714,7 @@ export default function NewScan() {
               <button
                 type="button"
                 onClick={startScan}
-                disabled={scanning}
+                disabled={scanning || Boolean(targetError)}
                 className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#00D98F] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[#00E39A] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <ScanLine size={17} />

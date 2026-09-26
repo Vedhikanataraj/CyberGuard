@@ -1,6 +1,6 @@
-import re
-import ipaddress
 import json
+import ipaddress
+import socket
 from io import BytesIO
 from datetime import datetime
 from uuid import uuid4
@@ -12,7 +12,8 @@ from fastapi import (
     HTTPException,
 )
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
+
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -32,10 +33,11 @@ from app.scanners.port_scanner import scan_ports
 
 from app.scanners.cve_scanner import (
     resolve_os_to_cpe,
+    resolve_product_to_cpe,
     lookup_cves_by_cpe,
 )
 
-from app.services.risk_engine import calculate_risk
+from app.services.risk_engine import calculate_risk, build_score_explanation
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
@@ -69,6 +71,13 @@ class ScanRequest(BaseModel):
     Used by:
         POST /api/scan
         POST /api/web-scan
+
+    Accepts:
+        127.0.0.1
+        192.168.1.10
+        example.com
+        http://example.com
+        https://example.com
     """
 
     target: str = Field(
@@ -77,22 +86,12 @@ class ScanRequest(BaseModel):
     )
 
     port_range: str = Field(
-        default="1-1000",
+        default="top-1000",
         min_length=1,
         max_length=100,
     )
 
-    @field_validator("target")
-    @classmethod
-    def validate_target(cls, value):
-        return validate_target_input(value)
 
-    @field_validator("port_range")
-    @classmethod
-    def validate_ports(cls, value):
-        return validate_port_range(value)
-
-    
 class PortScanRequest(BaseModel):
     """
     Used by:
@@ -105,238 +104,66 @@ class PortScanRequest(BaseModel):
     )
 
     port_range: str = Field(
-        default="1-1000",
+        default="top-1000",
         min_length=1,
         max_length=100,
     )
 
-    @field_validator("target")
-    @classmethod
-    def validate_target(cls, value):
-        return validate_target_input(value)
-
-    @field_validator("port_range")
-    @classmethod
-    def validate_ports(cls, value):
-        return validate_port_range(value)
 
 # ============================================================
-# INPUT VALIDATION
+# PUBLIC TARGET VALIDATION
 # ============================================================
 
-def validate_port_range(port_range: str) -> str:
-    """
-    Validate Nmap-compatible TCP port ranges.
-
-    Accepted examples:
-        80
-        80,443
-        1-1000
-        22,80,443
-        1-1000,8080
-    """
-
-    port_range = port_range.strip()
-
-    if not port_range:
-        raise ValueError(
-            "Port range cannot be empty."
-        )
-
-    if len(port_range) > 100:
-        raise ValueError(
-            "Port range is too long."
-        )
-
-    parts = port_range.split(",")
-
-    for part in parts:
-
-        part = part.strip()
-
-        if not part:
-            raise ValueError(
-                "Invalid port range."
-            )
-
-        # Single port
-        if part.isdigit():
-
-            port = int(part)
-
-            if not 1 <= port <= 65535:
-                raise ValueError(
-                    "Port numbers must be between 1 and 65535."
-                )
-
-            continue
-
-        # Port range
-        match = re.fullmatch(
-            r"(\d+)\s*-\s*(\d+)",
-            part
-        )
-
-        if not match:
-            raise ValueError(
-                "Invalid port range. Use formats such as 80, 443, or 1-1000."
-            )
-
-        start = int(match.group(1))
-        end = int(match.group(2))
-
-        if not 1 <= start <= 65535:
-            raise ValueError(
-                "Starting port must be between 1 and 65535."
-            )
-
-        if not 1 <= end <= 65535:
-            raise ValueError(
-                "Ending port must be between 1 and 65535."
-            )
-
-        if start > end:
-            raise ValueError(
-                "Starting port cannot be greater than ending port."
-            )
-
-    return port_range
-def validate_target_input(target: str) -> str:
-    """
-    Validate a scan target before it reaches the scanner.
-
-    Supports:
-        IPv4
-        IPv6
-        Hostnames
-        HTTP URLs
-        HTTPS URLs
-    """
-
+def validate_public_target(target: str):
+    """Reject private/local targets before any scanner executes."""
     target = target.strip()
-
     if not target:
-        raise ValueError(
-            "Target cannot be empty."
-        )
-
-    if len(target) > 2048:
-        raise ValueError(
-            "Target is too long."
-        )
-
-    # Reject control characters and whitespace
-    if any(
-        ord(character) < 32
-        for character in target
-    ):
-        raise ValueError(
-            "Target contains invalid characters."
-        )
-
-    # --------------------------------------------------------
-    # URL target
-    # --------------------------------------------------------
-
-    if target.startswith(
-        ("http://", "https://")
-    ):
-
-        parsed = urlparse(target)
-
-        if parsed.scheme not in (
-            "http",
-            "https",
-        ):
-            raise ValueError(
-                "Only HTTP and HTTPS URLs are supported."
-            )
-
-        if not parsed.hostname:
-            raise ValueError(
-                "Invalid URL. Please provide a valid hostname."
-            )
-
-        # Reject username/password in URLs
-        if parsed.username or parsed.password:
-            raise ValueError(
-                "URLs containing usernames or passwords are not allowed."
-            )
-
-        # Validate explicit URL port
-        try:
-            if parsed.port is not None:
-                if not 1 <= parsed.port <= 65535:
-                    raise ValueError(
-                        "URL port must be between 1 and 65535."
-                    )
-        except ValueError:
-            raise ValueError(
-                "Invalid URL port."
-            )
-
-        hostname = parsed.hostname
-
-    else:
-
-        # ----------------------------------------------------
-        # IP / hostname without protocol
-        # ----------------------------------------------------
-
-        parsed = urlparse(
-            f"//{target}"
-        )
-
-        hostname = parsed.hostname
-
-        if not hostname:
-            raise ValueError(
-                "Invalid target. Enter an IP address or hostname."
-            )
-
-        # Validate explicit port if supplied
-        try:
-            if parsed.port is not None:
-                if not 1 <= parsed.port <= 65535:
-                    raise ValueError(
-                        "Target port must be between 1 and 65535."
-                    )
-        except ValueError:
-            raise ValueError(
-                "Invalid target port."
-            )
-
-    # --------------------------------------------------------
-    # Validate hostname / IP
-    # --------------------------------------------------------
+        raise ValueError("Target cannot be empty.")
 
     try:
+        parsed = urlparse(target) if target.startswith(("http://", "https://")) else urlparse(f"//{target}")
+        hostname = parsed.hostname
+    except Exception as error:
+        raise ValueError("Invalid target.") from error
 
-        ipaddress.ip_address(
-            hostname
-        )
+    if not hostname:
+        raise ValueError("Invalid target.")
 
+    hostname = hostname.strip().lower()
+
+    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".local"):
+        raise ValueError("Private/local hostname cannot be scanned.")
+
+    try:
+        ip = ipaddress.ip_address(hostname)
     except ValueError:
+        ip = None
 
-        hostname_pattern = re.compile(
-            r"^(?=.{1,253}$)"
-            r"(?:[A-Za-z0-9]"
-            r"(?:[A-Za-z0-9-]{0,61}"
-            r"[A-Za-z0-9])?"
-            r"\.)*"
-            r"[A-Za-z0-9]"
-            r"(?:[A-Za-z0-9-]{0,61}"
-            r"[A-Za-z0-9])?$"
-        )
+    if ip is not None:
+        if not ip.is_global:
+            raise ValueError("Private IP cannot be scanned.")
+        return hostname
 
-        if not hostname_pattern.fullmatch(
-            hostname
-        ):
-            raise ValueError(
-                "Invalid hostname."
-            )
+    try:
+        addresses = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        for result in addresses:
+            if not result or not result[4]:
+                continue
+            try:
+                resolved_ip = ipaddress.ip_address(result[4][0])
+            except ValueError:
+                continue
+            if not resolved_ip.is_global:
+                raise ValueError(
+                    "Target resolves to a private or non-public IP and cannot be scanned."
+                )
+    except socket.gaierror:
+        # Let the scanner report DNS/connectivity errors later.
+        pass
 
-    return target
+    return hostname
+
+
 # ============================================================
 # TARGET NORMALIZATION
 # ============================================================
@@ -360,6 +187,8 @@ def normalize_target(target: str):
     """
 
     target = target.strip()
+
+    validate_public_target(target)
 
     if not target:
         raise ValueError(
@@ -402,7 +231,7 @@ def normalize_target(target: str):
     # Default HTTP URL
     # --------------------------------------------------------
 
-    web_url = f"http://{target}"
+    web_url = f"https://{target}"
 
     return hostname, web_url
 
@@ -558,402 +387,231 @@ def perform_network_scan(
     db,
     current_user,
 ):
-    """
-    Performs:
+    """Run Nmap, collect host/service/CPE data and query NVD for CVEs."""
 
-        Nmap
-        Ports
-        Services
-        OS
-        CPE
-        CVEs
-        Asset storage
-    """
+    result = scan_ports(target=target, port_range=port_range)
 
-    # ========================================================
-    # 1. RUN PORT SCANNER
-    # ========================================================
-
-    result = scan_ports(
-        target=target,
-        port_range=port_range,
-    )
-
-    # ========================================================
-    # 2. HOSTNAME
-    # ========================================================
-
-    hostname = result.get(
-        "hostname"
-    )
-
-    # ========================================================
-    # 3. OS
-    # ========================================================
-
-    os_detection = result.get(
-        "os_detection",
-        {},
-    )
-
-    operating_system = os_detection.get(
-        "name"
-    )
-
-    # ========================================================
-    # 4. PORTS
-    # ========================================================
-
-    open_ports = result.get(
-        "open_ports",
-        [],
-    )
-
-    # ========================================================
-    # 5. SERVICES
-    # ========================================================
+    hostname = result.get("hostname") or target
+    primary_ip = result.get("ip_address") or target
+    addresses = result.get("addresses", []) or []
+    open_ports = result.get("open_ports", []) or []
+    os_detection = result.get("os_detection", {}) or {}
+    operating_system = os_detection.get("name")
 
     services = []
+    for port in open_ports:
+        service = port.get("service")
+        if service and service not in services:
+            services.append(service)
+
+    # --------------------------------------------------------
+    # Resolve CPEs from detected services + OS.
+    # --------------------------------------------------------
+    cpe_records = []
+    seen_cpes = set()
+
+    def add_cpe(cpe_name, source, port=None, service=None, product=None, version=None):
+        if not cpe_name or cpe_name in seen_cpes:
+            return
+        seen_cpes.add(cpe_name)
+        cpe_records.append({
+            "cpe": cpe_name,
+            "source": source,
+            "port": port,
+            "service": service,
+            "product": product,
+            "version": version,
+        })
 
     for port in open_ports:
+        raw_cpe = port.get("cpe")
+        resolved_cpe = None
+        try:
+            resolved_cpe = resolve_product_to_cpe(
+                product=port.get("product"),
+                version=port.get("version"),
+                service=port.get("service"),
+                raw_cpe=raw_cpe,
+            )
+        except RuntimeError:
+            resolved_cpe = None
 
-        service = port.get(
-            "service"
-        )
-
-        if (
-            service
-            and service not in services
-        ):
-            services.append(
-                service
+        if resolved_cpe:
+            add_cpe(
+                resolved_cpe,
+                "service",
+                port=port.get("port"),
+                service=port.get("service"),
+                product=port.get("product"),
+                version=port.get("version"),
+            )
+        elif raw_cpe and str(raw_cpe).startswith("cpe:2.3:"):
+            add_cpe(
+                raw_cpe,
+                "nmap",
+                port=port.get("port"),
+                service=port.get("service"),
+                product=port.get("product"),
+                version=port.get("version"),
             )
 
-    # ========================================================
-    # 6. SERIALIZE
-    # ========================================================
+    os_cpe = None
+    if operating_system and operating_system.lower() != "unknown":
+        try:
+            os_cpe = resolve_os_to_cpe(operating_system)
+        except RuntimeError:
+            os_cpe = None
+        if os_cpe:
+            add_cpe(os_cpe, "os", product=operating_system)
 
-    ports_json = json.dumps(
-        open_ports
-    )
+    # --------------------------------------------------------
+    # CVE lookup from the best available service/OS CPEs.
+    # Cap unique CPEs to keep scan time bounded.
+    # --------------------------------------------------------
+    saved_vulnerabilities = []
+    cve_error = None
+    unique_cpes = cpe_records[:12]
 
-    services_json = json.dumps(
-        services
-    )
+    for record in unique_cpes:
+        try:
+            cves = lookup_cves_by_cpe(record["cpe"])
+        except RuntimeError as error:
+            cve_error = str(error)
+            continue
 
-    # ========================================================
-    # 7. FIND EXISTING ASSET
-    # ========================================================
+        for cve_data in cves:
+            item = {
+                "cve_id": cve_data.get("cve_id"),
+                "severity": cve_data.get("severity"),
+                "cvss_score": cve_data.get("cvss_score"),
+                "description": cve_data.get("description"),
+                "affected_product": cve_data.get("cpe_name"),
+                "cpe_name": record["cpe"],
+                "source": record.get("source"),
+                "port": record.get("port"),
+                "service": record.get("service"),
+                "product": record.get("product"),
+                "version": record.get("version"),
+            }
+            if item["cve_id"] and not any(
+                existing["cve_id"] == item["cve_id"]
+                and existing.get("cpe_name") == item.get("cpe_name")
+                for existing in saved_vulnerabilities
+            ):
+                saved_vulnerabilities.append(item)
+
+    # --------------------------------------------------------
+    # Persist asset using resolved IP, not hostname.
+    # --------------------------------------------------------
+    ports_json = json.dumps(open_ports)
+    services_json = json.dumps(services)
 
     asset = (
         db.query(Asset)
         .filter(
-            Asset.ip_address == target,
+            Asset.ip_address == primary_ip,
             Asset.user_id == current_user.id,
         )
         .first()
     )
 
-    # ========================================================
-    # 8. CREATE ASSET
-    # ========================================================
-
     if asset is None:
-
         asset = Asset(
-
-            ip_address=target,
-
+            ip_address=primary_ip,
             user_id=current_user.id,
-
             hostname=hostname,
-
             operating_system=operating_system,
-
             open_ports=ports_json,
-
             services=services_json,
-
             risk_level="Unknown",
-
             last_scanned=datetime.utcnow(),
         )
-
         db.add(asset)
-
         db.flush()
-
-    # ========================================================
-    # 9. UPDATE ASSET
-    # ========================================================
-
     else:
-
         asset.hostname = hostname
-
-        asset.operating_system = (
-            operating_system
-        )
-
+        asset.operating_system = operating_system
         asset.open_ports = ports_json
-
         asset.services = services_json
+        asset.last_scanned = datetime.utcnow()
 
-        asset.last_scanned = (
-            datetime.utcnow()
-        )
-
+    asset.risk_level = calculate_asset_risk(saved_vulnerabilities)
     db.commit()
-
     db.refresh(asset)
 
-    # ========================================================
-    # 10. CPE
-    # ========================================================
-
-    cpe_name = None
-
-    if operating_system:
-
-        try:
-
-            cpe_name = resolve_os_to_cpe(
-                operating_system
-            )
-
-        except RuntimeError:
-
-            cpe_name = None
-
-    # ========================================================
-    # 11. CVE LOOKUP
-    # ========================================================
-
-    cve_results = []
-
-    cve_error = None
-
-    if cpe_name:
-
-        try:
-
-            cve_results = lookup_cves_by_cpe(
-                cpe_name
-            )
-
-        except RuntimeError as error:
-
-            cve_error = str(error)
-
-    # ========================================================
-    # 12. SAVE CVEs
-    # ========================================================
-
-    saved_vulnerabilities = []
-
-    for cve_data in cve_results:
-
-        cve_id = cve_data.get(
-            "cve_id"
-        )
-
+    # Save CVEs into the existing vulnerability table.
+    for cve_data in saved_vulnerabilities:
+        cve_id = cve_data.get("cve_id")
         if not cve_id:
             continue
 
         vulnerability = (
             db.query(Vulnerability)
             .filter(
-                Vulnerability.asset_id
-                == asset.id,
-
-                Vulnerability.cve_id
-                == cve_id,
+                Vulnerability.asset_id == asset.id,
+                Vulnerability.cve_id == cve_id,
             )
             .first()
         )
 
-        # ----------------------------------------------------
-        # CREATE
-        # ----------------------------------------------------
+        values = {
+            "description": cve_data.get("description"),
+            "severity": cve_data.get("severity"),
+            "cvss_score": (
+                str(cve_data.get("cvss_score"))
+                if cve_data.get("cvss_score") is not None
+                else None
+            ),
+            "affected_product": cve_data.get("cpe_name"),
+            "detected_at": datetime.utcnow(),
+        }
 
         if vulnerability is None:
-
             vulnerability = Vulnerability(
-
                 asset_id=asset.id,
-
                 cve_id=cve_id,
-
                 title=cve_id,
-
-                description=cve_data.get(
-                    "description"
-                ),
-
-                severity=cve_data.get(
-                    "severity"
-                ),
-
-                cvss_score=(
-                    str(
-                        cve_data.get(
-                            "cvss_score"
-                        )
-                    )
-                    if cve_data.get(
-                        "cvss_score"
-                    ) is not None
-                    else None
-                ),
-
-                affected_product=cve_data.get(
-                    "cpe_name"
-                ),
-
-                detected_at=datetime.utcnow(),
+                **values,
             )
-
-            db.add(
-                vulnerability
-            )
-
-        # ----------------------------------------------------
-        # UPDATE
-        # ----------------------------------------------------
-
+            db.add(vulnerability)
         else:
-
             vulnerability.title = cve_id
-
-            vulnerability.description = (
-                cve_data.get(
-                    "description"
-                )
-            )
-
-            vulnerability.severity = (
-                cve_data.get(
-                    "severity"
-                )
-            )
-
-            vulnerability.cvss_score = (
-
-                str(
-                    cve_data.get(
-                        "cvss_score"
-                    )
-                )
-
-                if cve_data.get(
-                    "cvss_score"
-                ) is not None
-
-                else None
-            )
-
-            vulnerability.affected_product = (
-                cve_data.get(
-                    "cpe_name"
-                )
-            )
-
-            vulnerability.detected_at = (
-                datetime.utcnow()
-            )
-
-        saved_vulnerabilities.append({
-
-            "cve_id": cve_id,
-
-            "severity": cve_data.get(
-                "severity"
-            ),
-
-            "cvss_score": cve_data.get(
-                "cvss_score"
-            ),
-
-            "description": cve_data.get(
-                "description"
-            ),
-
-            "affected_product": cve_data.get(
-                "cpe_name"
-            ),
-        })
-
-    # ========================================================
-    # 13. ASSET RISK
-    # ========================================================
-
-    asset.risk_level = calculate_asset_risk(
-        cve_results
-    )
+            for key, value in values.items():
+                setattr(vulnerability, key, value)
 
     db.commit()
-
     db.refresh(asset)
 
-    # ========================================================
-    # 14. RESPONSE
-    # ========================================================
-
     response = {
-
-        "target": result.get(
-            "target",
-            target,
-        ),
-
-        "port_range": result.get(
-            "port_range",
-            port_range,
-        ),
-
+        "target": result.get("target", target),
+        "hostname": hostname,
+        "ip_address": primary_ip,
+        "addresses": addresses,
+        "port_range": result.get("port_range", port_range),
+        "scan_scope": result.get("scan_scope", port_range),
+        "scan_technique": result.get("scan_technique"),
         "open_ports": open_ports,
-
-        "total_open_ports": result.get(
-            "total_open_ports",
-            len(open_ports),
-        ),
-
+        "total_open_ports": len(open_ports),
         "os_detection": os_detection,
-
-        "cpe": cpe_name,
-
-        "cve_summary": build_cve_summary(
-            saved_vulnerabilities
-        ),
-
-        "vulnerabilities":
-            saved_vulnerabilities,
-
+        "cpe": cpe_records[0]["cpe"] if cpe_records else None,
+        "cpe_records": cpe_records,
+        "cve_summary": build_cve_summary(saved_vulnerabilities),
+        "vulnerabilities": saved_vulnerabilities,
         "asset": {
-
             "id": asset.id,
-
             "ip_address": asset.ip_address,
-
             "hostname": asset.hostname,
-
-            "operating_system":
-                asset.operating_system,
-
+            "operating_system": asset.operating_system,
+            "addresses": addresses,
             "open_ports": open_ports,
-
             "services": services,
-
-            "risk_level":
-                asset.risk_level,
-
-            "last_scanned":
-                asset.last_scanned,
+            "risk_level": asset.risk_level,
+            "last_scanned": asset.last_scanned,
+            "cpe_records": cpe_records,
         },
     }
 
     if cve_error:
-
         response["cve_error"] = cve_error
 
     return response
@@ -963,75 +621,41 @@ def perform_network_scan(
 # WEB SCAN HELPER
 # ============================================================
 
-async def perform_web_scan(
-    web_url,
-):
-    """
-    Runs the existing web scanner.
-    """
+async def perform_web_scan(web_url):
+    """Run the passive web/security-header scanner and attach score details."""
+    result = await scan_web(web_url)
 
-    result = await scan_web(
-        web_url
-    )
-
-    if result.get("status") != "completed":
-
+    if result.get("status") not in {"completed", "blocked"}:
         raise HTTPException(
-
             status_code=502,
-
-            detail=result.get(
-                "error",
-                "Web scan failed.",
-            ),
+            detail=result.get("error", "Web scan failed."),
         )
 
-    findings = result.get(
-        "findings",
-        [],
-    )
-
-    risk = calculate_risk(
-        findings
-    )
+    findings = result.get("findings", []) or []
+    risk = calculate_risk(findings)
 
     return {
-
-        "status": "completed",
-
-        "status_code":
-            result.get(
-                "status_code"
-            ),
-
-        "final_url":
-            result.get(
-                "final_url"
-            ),
-
-        "findings":
+        "status": result.get("status"),
+        "status_code": result.get("status_code"),
+        "request_url": result.get("request_url"),
+        "final_url": result.get("final_url"),
+        "findings": findings,
+        "security_headers": result.get("security_headers", []),
+        "headers_checked": result.get("headers_checked", []),
+        "header_summary": result.get("header_summary", {}),
+        "server": result.get("server"),
+        "content_type": result.get("content_type"),
+        "content_length": result.get("content_length"),
+        "security_score": risk.get("score"),
+        "grade": risk.get("grade"),
+        "risk_level": risk.get("risk_level"),
+        "score_explanation": build_score_explanation(
             findings,
-
-        "headers_checked":
-            result.get(
-                "headers_checked",
-                [],
-            ),
-
-        "security_score":
-            risk.get(
-                "score"
-            ),
-
-        "grade":
-            risk.get(
-                "grade"
-            ),
-
-        "risk_level":
-            risk.get(
-                "risk_level"
-            ),
+            risk.get("score"),
+            risk.get("grade"),
+            risk.get("risk_level"),
+        ),
+        "error": result.get("error"),
     }
 
 
@@ -1055,6 +679,8 @@ async def start_full_scan(
         # ====================================================
         # NORMALIZE TARGET
         # ====================================================
+
+        validate_public_target(request.target)
 
         hostname, web_url = normalize_target(
             request.target
@@ -1199,46 +825,15 @@ async def start_full_scan(
         # COMBINED RISK
         # ====================================================
 
-        if (
-            network_risk
-            == "Critical"
-        ):
-
-            risk_level = "Critical"
-
-        elif (
-            network_risk
-            == "High"
-        ):
-
-            risk_level = "High"
-
-        elif web_result and (
-            web_result.get(
-                "risk_level"
-            )
-            == "High"
-        ):
-
-            risk_level = "High"
-
-        elif (
-            network_risk
-            == "Moderate"
-        ):
-
-            risk_level = "Moderate"
-
-        else:
-
-            risk_level = (
-                web_result.get(
-                    "risk_level",
-                    "Low",
-                )
-                if web_result
-                else network_risk
-            )
+        risk_level = (
+            "Low"
+            if security_score >= 90
+            else "Moderate"
+            if security_score >= 75
+            else "High"
+            if security_score >= 60
+            else "Critical"
+        )
 
         # ====================================================
         # CREATE TARGET
@@ -1369,6 +964,54 @@ async def start_full_scan(
         )
 
         # ====================================================
+        # SCORE EXPLANATION
+        # ====================================================
+
+        web_score = (
+            web_result.get("security_score")
+            if web_result
+            else None
+        )
+
+        score_breakdown = {
+            "network_score": network_score,
+            "network_reason": (
+                "Based on the highest CVSS/CVE risk identified from service/OS CPE evidence."
+                if network_result.get("vulnerabilities")
+                else "No CVE matches were identified from the CPE/product evidence collected."
+            ),
+            "web_score": web_score,
+            "web_reason": (
+                "Based on weighted web security-header findings."
+                if web_findings
+                else "No web security finding deductions were returned."
+            ),
+            "combined_method": (
+                "Final score is the average of network and web scores when both are available."
+                if web_result and web_score is not None
+                else "Final score uses the available assessment score."
+            ),
+            "network_score": network_score,
+            "web_score": web_score,
+            "final_score": security_score,
+            "grade_thresholds": {
+                "A": "90-100",
+                "B": "75-89",
+                "C": "60-74",
+                "D": "40-59",
+                "F": "0-39",
+            },
+            "risk_thresholds": {
+                "Low": "90-100",
+                "Moderate": "75-89",
+                "High": "60-74",
+                "Critical": "0-59",
+            },
+            "cve_count": cve_summary.get("total", 0),
+            "web_finding_count": len(web_findings),
+        }
+
+        # ====================================================
         # RETURN FULL RESULT
         # ====================================================
 
@@ -1404,6 +1047,20 @@ async def start_full_scan(
             "risk_level":
                 risk_level,
 
+            "total_findings":
+                len(web_findings) + len(network_result.get("vulnerabilities", [])),
+
+            "score_breakdown":
+                score_breakdown,
+
+            "target_info": {
+                "domain": hostname,
+                "ip_address": network_result.get("ip_address"),
+                "addresses": network_result.get("addresses", []),
+                "web_url": web_url,
+                "port_range": request.port_range,
+            },
+
             "started_at":
                 scan.started_at,
 
@@ -1426,6 +1083,21 @@ async def start_full_scan(
                         "total_open_ports"
                     ],
 
+                "hostname":
+                    network_result.get("hostname"),
+
+                "ip_address":
+                    network_result.get("ip_address"),
+
+                "addresses":
+                    network_result.get("addresses", []),
+
+                "scan_scope":
+                    network_result.get("scan_scope"),
+
+                "scan_technique":
+                    network_result.get("scan_technique"),
+
                 "os_detection":
                     network_result[
                         "os_detection"
@@ -1435,6 +1107,9 @@ async def start_full_scan(
                     network_result[
                         "cpe"
                     ],
+
+                "cpe_records":
+                    network_result.get("cpe_records", []),
 
                 "cve_summary":
                     cve_summary,
@@ -1477,6 +1152,9 @@ async def start_full_scan(
                     "cpe"
                 ],
 
+            "cpe_records":
+                network_result.get("cpe_records", []),
+
             "cve_summary":
                 cve_summary,
 
@@ -1499,6 +1177,11 @@ async def start_full_scan(
 
             "web_findings":
                 web_findings,
+
+            "security_headers":
+                web_result.get("security_headers", [])
+                if web_result
+                else [],
         }
 
         if web_error:
@@ -1587,6 +1270,8 @@ async def start_web_scan(
 ):
 
     try:
+
+        validate_public_target(request.target)
 
         _, web_url = normalize_target(
             request.target
@@ -1892,6 +1577,7 @@ def start_port_scan(
         # --------------------------------------------------------
         # 1. NORMALIZE TARGET
         # --------------------------------------------------------
+        validate_public_target(request.target)
         hostname, web_url = normalize_target(request.target)
 
         # --------------------------------------------------------
@@ -1987,6 +1673,17 @@ def start_port_scan(
             "security_score": security_score,
             "grade": grade,
             "risk_level": risk_level,
+            "total_findings": len(network_result.get("vulnerabilities", [])),
+            "score_breakdown": {
+                "network_score": security_score,
+                "network_reason": (
+                    "Based on the highest CVSS/CVE risk identified from collected CPE evidence."
+                    if network_result.get("vulnerabilities")
+                    else "No CVE matches were identified from the collected CPE/product evidence."
+                ),
+                "grade_thresholds": {"A": "90-100", "B": "75-89", "C": "60-74", "D": "40-59", "F": "0-39"},
+                "risk_thresholds": {"Low": "90-100", "Moderate": "75-89", "High": "60-74", "Critical": "0-59"},
+            },
             "started_at": scan.started_at,
             "completed_at": scan.completed_at,
 

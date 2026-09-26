@@ -1,471 +1,216 @@
+import ipaddress
+import re
+import socket
 import subprocess
 import xml.etree.ElementTree as ET
-import re
 
-
-# ============================================================
-# TARGET VALIDATION
-# ============================================================
 
 def validate_target(target: str) -> bool:
-    """
-    Basic validation for a host/IP target.
-
-    Only intended for systems that you own
-    or are explicitly authorized to test.
-    """
-
     if not target or len(target) > 253:
         return False
-
-    pattern = r"^[a-zA-Z0-9._:/-]+$"
-
-    return bool(re.match(pattern, target))
+    return bool(re.match(r"^[a-zA-Z0-9._:-]+$", target))
 
 
-# ============================================================
-# PORT SCANNER
-# ============================================================
+def _resolve_addresses(target):
+    addresses = []
+    try:
+        infos = socket.getaddrinfo(target, None, type=socket.SOCK_STREAM)
+        for result in infos:
+            if not result or not result[4]:
+                continue
+            address = result[4][0]
+            if address not in addresses:
+                addresses.append(address)
+    except socket.gaierror:
+        pass
+    return addresses
 
-def scan_ports(
-    target: str,
-    port_range: str = "1-1000"
-):
-    """
-    CyberGuard network scanner.
 
-    Current capabilities:
-        1. Port scanning
-        2. Service detection
-        3. Product detection
-        4. Version detection
-        5. CPE detection
-        6. OS detection
-    """
+def _host_details(host, target):
+    addresses = []
+    for address in host.findall("./address") if host is not None else []:
+        value = address.get("addr")
+        if value and value not in addresses:
+            addresses.append(value)
 
-    # --------------------------------------------------------
-    # Validate target
-    # --------------------------------------------------------
+    if not addresses:
+        addresses = _resolve_addresses(target)
 
+    primary_ip = None
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if ip.version == 4:
+            primary_ip = address
+            break
+        if primary_ip is None:
+            primary_ip = address
+
+    hostname = None
+    if host is not None:
+        host_name = host.find("./hostnames/hostname")
+        if host_name is not None:
+            hostname = host_name.get("name")
+
+    if not hostname:
+        try:
+            hostname = socket.getfqdn(target)
+        except OSError:
+            hostname = target
+
+    return primary_ip or target, hostname, addresses
+
+
+def _run_nmap(command):
+    return subprocess.run(command, capture_output=True, text=True, timeout=300)
+
+
+def scan_ports(target: str, port_range: str = "top-1000"):
     if not validate_target(target):
+        raise ValueError("Invalid target.")
 
-        raise ValueError(
-            "Invalid target."
-        )
-
-    # --------------------------------------------------------
-    # Nmap command
-    # --------------------------------------------------------
-
+    normalized_scope = str(port_range or "top-1000").strip().lower()
     command = [
+    "nmap",
+    "-T4",
+    "-sT",
+    "-sV",
+    "--version-light",
+    "-O",
+]
 
-        "nmap",
+    if normalized_scope.startswith("top-"):
+        count = int(normalized_scope.split("-", 1)[1])
+        if not 1 <= count <= 10000:
+            raise ValueError("Top-port count must be between 1 and 10000.")
+        command.extend(["--top-ports", str(count)])
+        scan_scope = f"Top {count} common TCP ports"
+    else:
+        command.extend(["-p", normalized_scope])
+        scan_scope = normalized_scope
 
-        # TCP connect scan
-        "-sT",
-
-        # Service and version detection
-        "-sV",
-
-        # OS detection
-        "-O",
-
-        # Try harder with OS detection
-        "--osscan-guess",
-
-        # Requested port range
-        "-p",
-        port_range,
-
-        # XML output
-        "-oX",
-        "-",
-
-        target
-    ]
-
-    # --------------------------------------------------------
-    # Execute Nmap
-    # --------------------------------------------------------
+    command.extend(["-oX", "-", target])
 
     try:
+        result = _run_nmap(command)
 
-        result = subprocess.run(
+        # On Windows/Linux development machines, SYN scans may fail when
+        # raw-packet privileges are unavailable. Fall back to TCP connect.
+        if result.returncode != 0 and any(
+            token in (result.stderr or "").lower()
+            for token in ("requires root", "requires privileged", "raw socket", "permission denied")
+        ):
+            command = [item if item != "-sS" else "-sT" for item in command]
+            result = _run_nmap(command)
+            scan_technique = "TCP Connect (-sT) fallback"
+        else:
+            scan_technique = "TCP SYN (-sS)"
 
-            command,
-
-            capture_output=True,
-
-            text=True,
-
-            timeout=240
-        )
-
-    except subprocess.TimeoutExpired:
-
-        raise RuntimeError(
-            "Nmap scan timed out."
-        )
-
-    except FileNotFoundError:
-
-        raise RuntimeError(
-            "Nmap is not installed or is not available in PATH."
-        )
-
-    # --------------------------------------------------------
-    # Check Nmap result
-    # --------------------------------------------------------
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("Nmap scan timed out.") from error
+    except FileNotFoundError as error:
+        raise RuntimeError("Nmap is not installed or is not available in PATH.") from error
 
     if result.returncode != 0:
-
-        error_message = (
-
-            result.stderr.strip()
-
-            or result.stdout.strip()
-
-            or "Nmap scan failed."
-
-        )
-
-        raise RuntimeError(
-            error_message
-        )
-
-    # --------------------------------------------------------
-    # Parse XML
-    # --------------------------------------------------------
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Nmap scan failed.")
 
     try:
+        root = ET.fromstring(result.stdout)
+    except ET.ParseError as error:
+        raise RuntimeError("Unable to parse Nmap XML output.") from error
 
-        root = ET.fromstring(
-            result.stdout
-        )
-
-    except ET.ParseError:
-
-        raise RuntimeError(
-            "Unable to parse Nmap XML output."
-        )
-
-    # ========================================================
-    # HOST INFORMATION
-    # ========================================================
-
-    host = root.find(
-        ".//host"
-    )
-
+    host = root.find(".//host")
     if host is None:
-
+        ip_address, hostname, addresses = _host_details(None, target)
         return {
-
             "status": "completed",
-
             "target": target,
-
+            "hostname": hostname,
+            "ip_address": ip_address,
+            "addresses": addresses,
             "port_range": port_range,
-
+            "scan_scope": scan_scope,
+            "scan_technique": scan_technique,
             "open_ports": [],
-
             "total_open_ports": 0,
-
-            "os_detection": {
-
-                "name": "Unknown",
-
-                "accuracy": None,
-
-                "details": []
-
-            }
-
+            "os_detection": {"name": "Unknown", "accuracy": None, "details": []},
         }
 
-    # ========================================================
-    # OPEN PORTS
-    # SERVICE / PRODUCT / VERSION / CPE DETECTION
-    # ========================================================
-
+    ip_address, hostname, addresses = _host_details(host, target)
     open_ports = []
 
-    for port in host.findall(
-        "./ports/port"
-    ):
-
-        # ----------------------------------------------------
-        # Port state
-        # ----------------------------------------------------
-
-        state_element = port.find(
-            "state"
-        )
-
-        if state_element is None:
+    for port in host.findall("./ports/port"):
+        state_element = port.find("state")
+        if state_element is None or state_element.get("state") != "open":
             continue
 
-        state = state_element.get(
-            "state"
-        )
-
-        # Only keep open ports
-        if state != "open":
-            continue
-
-        # ----------------------------------------------------
-        # Port number
-        # ----------------------------------------------------
-
-        port_number = port.get(
-            "portid"
-        )
-
+        port_number = port.get("portid")
         if not port_number:
             continue
 
-        # ----------------------------------------------------
-        # Protocol
-        # ----------------------------------------------------
+        protocol = port.get("protocol", "tcp")
+        service_element = port.find("service")
 
-        protocol = port.get(
-            "protocol",
-            "tcp"
-        )
-
-        # ----------------------------------------------------
-        # Service information
-        # ----------------------------------------------------
-
-        service_element = port.find(
-            "service"
-        )
-
-        service = None
-
-        product = None
-
-        version = None
-
-        extra_info = None
-
-        cpe = None
-
-        # ----------------------------------------------------
-        # Extract service information
-        # ----------------------------------------------------
-
+        service = product = version = extra_info = cpe = None
         if service_element is not None:
-
-            service = service_element.get(
-                "name"
-            )
-
-            product = service_element.get(
-                "product"
-            )
-
-            version = service_element.get(
-                "version"
-            )
-
-            extra_info = service_element.get(
-                "extrainfo"
-            )
-
-            # ------------------------------------------------
-            # CPE DETECTION
-            # ------------------------------------------------
-            #
-            # Nmap can provide one or more:
-            #
-            # <cpe>cpe:/a:...</cpe>
-            #
-            # or:
-            #
-            # <cpe>cpe:2.3:a:...</cpe>
-            #
-            # We take the first valid CPE.
-            # ------------------------------------------------
-
-            cpe_element = service_element.find(
-                "cpe"
-            )
-
-            if cpe_element is not None:
-
-                cpe_text = (
-                    cpe_element.text
-                )
-
-                if cpe_text:
-
-                    cpe = cpe_text.strip()
-
-        # ----------------------------------------------------
-        # Add open port
-        # ----------------------------------------------------
+            service = service_element.get("name")
+            product = service_element.get("product")
+            version = service_element.get("version")
+            extra_info = service_element.get("extrainfo")
+            cpe_element = service_element.find("cpe")
+            if cpe_element is not None and cpe_element.text:
+                cpe = cpe_element.text.strip()
 
         open_ports.append({
-
-            "port": int(
-                port_number
-            ),
-
+            "port": int(port_number),
             "protocol": protocol,
-
-            "state": state,
-
+            "state": "open",
             "service": service,
-
             "product": product,
-
             "version": version,
-
             "extra_info": extra_info,
-
-            "cpe": cpe
-
+            "cpe": cpe,
         })
 
-    # ========================================================
-    # OS DETECTION
-    # ========================================================
+    open_ports.sort(key=lambda item: (item["protocol"], item["port"]))
 
-    os_detection = {
-
-        "name": "Unknown",
-
-        "accuracy": None,
-
-        "details": []
-
-    }
-
-    # --------------------------------------------------------
-    # Find best OS match
-    # --------------------------------------------------------
-
-    os_match = host.find(
-        "./os/osmatch"
-    )
-
-    if os_match is not None:
-
-        os_name = os_match.get(
-            "name"
-        )
-
-        accuracy = os_match.get(
-            "accuracy"
-        )
-
-        # ----------------------------------------------------
-        # OS name
-        # ----------------------------------------------------
-
-        if os_name:
-
-            os_detection["name"] = os_name
-
-        # ----------------------------------------------------
-        # OS accuracy
-        # ----------------------------------------------------
-
-        if accuracy:
-
-            try:
-
-                os_detection["accuracy"] = int(
-                    accuracy
-                )
-
-            except ValueError:
-
-                os_detection["accuracy"] = None
-
-        # ----------------------------------------------------
-        # OS class details
-        # ----------------------------------------------------
-
-        os_classes = os_match.findall(
-            "./osclass"
-        )
+    os_detection = {"name": "Unknown", "accuracy": None, "details": []}
+    os_matches = host.findall("./os/osmatch")
+    if os_matches:
+        best = max(os_matches, key=lambda item: int(item.get("accuracy") or 0))
+        os_detection["name"] = best.get("name") or "Unknown"
+        try:
+            os_detection["accuracy"] = int(best.get("accuracy"))
+        except (TypeError, ValueError):
+            os_detection["accuracy"] = None
 
         details = []
-
-        for os_class in os_classes:
-
-            vendor = os_class.get(
-                "vendor"
-            )
-
-            os_family = os_class.get(
-                "osfamily"
-            )
-
-            os_gen = os_class.get(
-                "osgen"
-            )
-
-            accuracy_class = os_class.get(
-                "accuracy"
-            )
-
-            parts = []
-
-            if vendor:
-
-                parts.append(
-                    vendor
-                )
-
-            if os_family:
-
-                parts.append(
-                    os_family
-                )
-
-            if os_gen:
-
-                parts.append(
-                    os_gen
-                )
-
-            if accuracy_class:
-
-                parts.append(
-                    f"{accuracy_class}% accuracy"
-                )
-
-            if parts:
-
-                details.append(
-                    " ".join(parts)
-                )
-
-        if details:
-
-            os_detection["details"] = details
-
-    # ========================================================
-    # RETURN RESULT
-    # ========================================================
+        for os_class in best.findall("./osclass"):
+            parts = [
+                os_class.get("vendor"),
+                os_class.get("osfamily"),
+                os_class.get("osgen"),
+            ]
+            label = " ".join(part for part in parts if part)
+            accuracy = os_class.get("accuracy")
+            if accuracy:
+                label = f"{label} ({accuracy}% accuracy)" if label else f"{accuracy}% accuracy"
+            if label:
+                details.append(label)
+        os_detection["details"] = details
 
     return {
-
         "status": "completed",
-
         "target": target,
-
+        "hostname": hostname,
+        "ip_address": ip_address,
+        "addresses": addresses,
         "port_range": port_range,
-
+        "scan_scope": scan_scope,
+        "scan_technique": scan_technique,
         "open_ports": open_ports,
-
-        "total_open_ports": len(
-            open_ports
-        ),
-
-        "os_detection": os_detection
-
+        "total_open_ports": len(open_ports),
+        "os_detection": os_detection,
     }

@@ -1,644 +1,211 @@
 import os
+import re
+from functools import lru_cache
+
 import httpx
 
+NVD_CVE_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+NVD_CPE_API = "https://services.nvd.nist.gov/rest/json/cpes/2.0"
 
-# ============================================================
-# NVD APIs
-# ============================================================
-
-NVD_CVE_API = (
-    "https://services.nvd.nist.gov/rest/json/cves/2.0"
-)
-
-NVD_CPE_API = (
-    "https://services.nvd.nist.gov/rest/json/cpes/2.0"
-)
-
-
-# ============================================================
-# NVD HEADERS
-# ============================================================
 
 def get_nvd_headers():
-
-    headers = {
-        "User-Agent": "CyberGuard/1.0"
-    }
-
-    api_key = os.getenv(
-        "NVD_API_KEY"
-    )
-
+    headers = {"User-Agent": "CyberGuard/1.0"}
+    api_key = os.getenv("NVD_API_KEY")
     if api_key:
         headers["apiKey"] = api_key
-
     return headers
 
 
-# ============================================================
-# RESOLVE OS NAME USING NVD CPE API
-# ============================================================
+def _tokens(value):
+    return [token for token in re.split(r"[^a-z0-9]+", str(value or "").lower()) if token]
 
-def resolve_os_to_cpe(os_name: str):
-    """
-    Resolve an OS name to an official NVD CPE name.
 
-    Example:
-        Microsoft Windows 11 24H2
-        ->
-        NVD CPE API
-        ->
-        official CPE name
-    """
-
-    if not os_name:
+def _cpe_parts(cpe_name):
+    if not isinstance(cpe_name, str) or not cpe_name.startswith("cpe:2.3:"):
         return None
-
-    os_name_lower = os_name.lower()
-
-    # ========================================================
-    # Determine CPE match string
-    # ========================================================
-
-    if "windows 11" in os_name_lower and "24h2" in os_name_lower:
-
-        match_string = (
-            "cpe:2.3:o:microsoft:windows_11_24h2"
-        )
-
-    elif (
-        "windows 11" in os_name_lower
-        and "25h2" in os_name_lower
-    ):
-
-        match_string = (
-            "cpe:2.3:o:microsoft:windows_11_25h2"
-        )
-
-    elif "windows 11" in os_name_lower:
-
-        match_string = (
-            "cpe:2.3:o:microsoft:windows_11"
-        )
-
-    else:
+    parts = cpe_name.split(":", 12)
+    if len(parts) != 13:
         return None
-
-    # ========================================================
-    # Query NVD CPE API
-    # ========================================================
-
-    headers = get_nvd_headers()
-
-    params = {
-        "cpeMatchString": match_string,
-        "resultsPerPage": 100
+    return {
+        "part": parts[2],
+        "vendor": parts[3],
+        "product": parts[4],
+        "version": parts[5],
     }
 
+
+@lru_cache(maxsize=128)
+def _search_cpe_dictionary(keyword, part=None):
+    params = {
+        "keywordSearch": keyword,
+        "resultsPerPage": 50,
+    }
+    if part:
+        params["cpeMatchString"] = f"cpe:2.3:{part}:*:*"
+
     try:
-
-        with httpx.Client(
-            timeout=30.0,
-            headers=headers
-        ) as client:
-
-            response = client.get(
-                NVD_CPE_API,
-                params=params
-            )
-
+        with httpx.Client(timeout=30.0, headers=get_nvd_headers()) as client:
+            response = client.get(NVD_CPE_API, params=params)
         response.raise_for_status()
-
         data = response.json()
-
-    except httpx.TimeoutException:
-
-        raise RuntimeError(
-            "NVD CPE request timed out."
-        )
-
+    except httpx.TimeoutException as error:
+        raise RuntimeError("NVD CPE request timed out.") from error
     except httpx.HTTPStatusError as error:
-
-        raise RuntimeError(
-            "NVD CPE API returned HTTP "
-            f"{error.response.status_code}."
-        )
-
+        raise RuntimeError(f"NVD CPE API returned HTTP {error.response.status_code}.") from error
     except httpx.RequestError as error:
+        raise RuntimeError(f"Unable to connect to NVD CPE API: {error}") from error
 
-        raise RuntimeError(
-            f"Unable to connect to NVD CPE API: {error}"
-        )
-
-    # ========================================================
-    # Extract products
-    # ========================================================
-
-    products = data.get("products", [])
-
-    if not isinstance(products, list):
-        return None
-
-    # ========================================================
-    # Extract CPE names safely
-    # ========================================================
-
-    cpe_names = []
-
-    for product in products:
-
-        # --------------------------------------------
-        # Product must be a dictionary
-        # --------------------------------------------
-
-        if not isinstance(product, dict):
-            continue
-
-        cpe_data = product.get("cpe")
-
+    names = []
+    for item in data.get("products", []):
+        cpe_data = item.get("cpe", {}) if isinstance(item, dict) else {}
         if not isinstance(cpe_data, dict):
             continue
+        if cpe_data.get("deprecated", False):
+            continue
+        entries = cpe_data.get("cpeName", [])
+        if isinstance(entries, dict):
+            entries = [entries]
+        for entry in entries:
+            name = entry if isinstance(entry, str) else entry.get("cpeName")
+            if isinstance(name, str) and name.startswith("cpe:2.3:"):
+                names.append(name)
 
-        cpe_entries = cpe_data.get("cpeName", [])
+    return list(dict.fromkeys(names))
 
-        # --------------------------------------------
-        # cpeName may be a list
-        # --------------------------------------------
 
-        if isinstance(cpe_entries, list):
+def _choose_cpe(candidates, product=None, version=None, part=None):
+    query_product = _tokens(product)
+    query_version = _tokens(version)
+    best_name = None
+    best_score = -1
 
-            for entry in cpe_entries:
-
-                # NVD may return an object
-                if isinstance(entry, dict):
-
-                    name = entry.get("cpeName")
-
-                    if isinstance(name, str):
-                        cpe_names.append(name)
-
-                # Or a direct string
-                elif isinstance(entry, str):
-
-                    cpe_names.append(entry)
-
-        # --------------------------------------------
-        # Or cpeName may directly be a string
-        # --------------------------------------------
-
-        elif isinstance(cpe_entries, str):
-
-            cpe_names.append(cpe_entries)
-
-        # --------------------------------------------
-        # Or a single dictionary
-        # --------------------------------------------
-
-        elif isinstance(cpe_entries, dict):
-
-            name = cpe_entries.get("cpeName")
-
-            if isinstance(name, str):
-                cpe_names.append(name)
-
-    # ========================================================
-    # Remove invalid / duplicate values
-    # ========================================================
-
-    valid_cpes = []
-
-    for name in cpe_names:
-
-        if not isinstance(name, str):
+    for candidate in candidates:
+        parts = _cpe_parts(candidate)
+        if not parts:
+            continue
+        if part and parts["part"] != part:
             continue
 
-        if not name.startswith("cpe:2.3:"):
-            continue
+        score = 0
+        candidate_product = _tokens(parts["product"])
+        candidate_text = " ".join([
+            parts["vendor"],
+            parts["product"],
+            parts["version"],
+        ])
 
-        if name not in valid_cpes:
-            valid_cpes.append(name)
+        for token in query_product:
+            if token in candidate_product:
+                score += 4
+            elif token in candidate_text:
+                score += 2
 
-    # ========================================================
-    # No CPE found
-    # ========================================================
+        for token in query_version:
+            if token and token == parts["version"].lower():
+                score += 8
+            elif token and token in parts["version"].lower():
+                score += 3
 
-    if not valid_cpes:
+        if score > best_score:
+            best_score = score
+            best_name = candidate
+
+    return best_name if best_score > 0 else (candidates[0] if candidates else None)
+
+
+def resolve_product_to_cpe(product: str, version: str = None, service: str = None, raw_cpe: str = None):
+    """Resolve detected service/product evidence to an official NVD CPE 2.3 name."""
+    if isinstance(raw_cpe, str) and raw_cpe.startswith("cpe:2.3:"):
+        return raw_cpe
+
+    search_terms = []
+    if product:
+        search_terms.append(product)
+    if version:
+        search_terms.append(version)
+    if not search_terms and service:
+        search_terms.append(service)
+    keyword = " ".join(search_terms).strip()
+
+    if not keyword:
         return None
 
-    # ========================================================
-    # Return first official CPE
-    # ========================================================
+    candidates = _search_cpe_dictionary(keyword, part="a")
+    return _choose_cpe(candidates, product=product, version=version, part="a")
 
-    return valid_cpes[0]
-    # --------------------------------------------------------
-    # Query NVD CPE API
-    # --------------------------------------------------------
 
-    headers = get_nvd_headers()
-
-    params = {
-        "cpeMatchString": match_string,
-        "resultsPerPage": 100
-    }
-
-    try:
-
-        with httpx.Client(
-            timeout=30.0,
-            headers=headers
-        ) as client:
-
-            response = client.get(
-                NVD_CPE_API,
-                params=params
-            )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-    except httpx.TimeoutException:
-
-        raise RuntimeError(
-            "NVD CPE request timed out."
-        )
-
-    except httpx.HTTPStatusError as error:
-
-        raise RuntimeError(
-            "NVD CPE API returned HTTP "
-            f"{error.response.status_code}."
-        )
-
-    except httpx.RequestError as error:
-
-        raise RuntimeError(
-            f"Unable to connect to NVD CPE API: {error}"
-        )
-
-    # --------------------------------------------------------
-    # Extract official CPE names
-    # --------------------------------------------------------
-
-    products = data.get(
-        "products",
-        []
-    )
-
-    if not products:
+def resolve_os_to_cpe(os_name: str):
+    if not os_name or str(os_name).strip().lower() == "unknown":
         return None
 
-    cpe_names = []
+    candidates = _search_cpe_dictionary(str(os_name), part="o")
+    return _choose_cpe(candidates, product=os_name, part="o")
 
-    for product in products:
-
-        cpe_data = product.get(
-            "cpe",
-            {}
-        )
-
-        cpe_entries = cpe_data.get(
-            "cpeName",
-            []
-        )
-
-        for cpe_entry in cpe_entries:
-
-            # NVD may return the CPE entry as a string
-            if isinstance(cpe_entry, str):
-
-                cpe_name = cpe_entry
-
-            # Some responses may return an object
-            elif isinstance(cpe_entry, dict):
-
-                cpe_name = cpe_entry.get(
-                    "cpeName"
-                )
-
-            else:
-
-                cpe_name = None
-
-            if cpe_name:
-
-                cpe_names.append(
-                    cpe_name
-                )
-
-    if not cpe_names:
-        return None
-
-    # --------------------------------------------------------
-    # Prefer the newest non-deprecated CPE
-    # --------------------------------------------------------
-
-    non_deprecated = []
-
-    for product in products:
-
-        cpe_data = product.get(
-            "cpe",
-            {}
-        )
-
-        if not cpe_data.get(
-            "deprecated",
-            False
-        ):
-
-            cpe_names_data = cpe_data.get(
-                "cpeName",
-                []
-            )
-
-            for cpe_entry in cpe_names_data:
-
-                cpe_name = cpe_entry.get(
-                    "cpeName"
-                )
-
-                if cpe_name:
-
-                    non_deprecated.append(
-                        cpe_name
-                    )
-
-    if non_deprecated:
-
-        return non_deprecated[0]
-
-    return cpe_names[0]
-
-
-# ============================================================
-# LOOKUP CVEs BY CPE
-# ============================================================
 
 def lookup_cves_by_cpe(cpe_name: str):
-
-    """
-    Query NVD for vulnerabilities associated with
-    a specific CPE.
-
-    The CPE must be a valid CPE 2.3 name.
-    """
-
     if not cpe_name:
-
         return []
-
-    # --------------------------------------------------------
-    # Validate CPE format
-    # --------------------------------------------------------
-
-    if not cpe_name.startswith(
-        "cpe:2.3:"
-    ):
-
-        raise RuntimeError(
-            "Invalid CPE format. "
-            "NVD CVE lookup requires a CPE 2.3 name."
-        )
-
-    headers = get_nvd_headers()
+    if not cpe_name.startswith("cpe:2.3:"):
+        raise RuntimeError("Invalid CPE format. NVD CVE lookup requires a CPE 2.3 name.")
 
     params = {
-
         "cpeName": cpe_name,
-
-        "isVulnerable": "",
-
-        "noRejected": "",
-
-        "resultsPerPage": 50
+        "resultsPerPage": 50,
     }
 
     try:
-
-        with httpx.Client(
-
-            timeout=30.0,
-
-            headers=headers
-
-        ) as client:
-
-            response = client.get(
-
-                NVD_CVE_API,
-
-                params=params
-
-            )
-
+        with httpx.Client(timeout=30.0, headers=get_nvd_headers()) as client:
+            response = client.get(NVD_CVE_API, params=params)
         response.raise_for_status()
-
         data = response.json()
-
-    except httpx.TimeoutException:
-
-        raise RuntimeError(
-            "NVD CVE request timed out."
-        )
-
+    except httpx.TimeoutException as error:
+        raise RuntimeError("NVD CVE request timed out.") from error
     except httpx.HTTPStatusError as error:
-
-        raise RuntimeError(
-            "NVD CVE API returned HTTP "
-            f"{error.response.status_code}."
-        )
-
+        raise RuntimeError(f"NVD CVE API returned HTTP {error.response.status_code}.") from error
     except httpx.RequestError as error:
-
-        raise RuntimeError(
-            f"Unable to connect to NVD CVE API: {error}"
-        )
-
-    # ========================================================
-    # PARSE CVE RESULTS
-    # ========================================================
+        raise RuntimeError(f"Unable to connect to NVD CVE API: {error}") from error
 
     vulnerabilities = []
-
-    for item in data.get(
-        "vulnerabilities",
-        []
-    ):
-
-        cve = item.get(
-            "cve",
-            {}
-        )
-
-        cve_id = cve.get(
-            "id"
-        )
-
+    for item in data.get("vulnerabilities", []):
+        cve = item.get("cve", {}) if isinstance(item, dict) else {}
+        cve_id = cve.get("id")
         if not cve_id:
             continue
 
-        # ----------------------------------------------------
-        # Description
-        # ----------------------------------------------------
-
         description = ""
-
-        for entry in cve.get(
-            "descriptions",
-            []
-        ):
-
-            if entry.get(
-                "lang"
-            ) == "en":
-
-                description = entry.get(
-                    "value",
-                    ""
-                )
-
+        for entry in cve.get("descriptions", []):
+            if entry.get("lang") == "en":
+                description = entry.get("value", "")
                 break
 
-        # ----------------------------------------------------
-        # CVSS information
-        # ----------------------------------------------------
-
         severity = None
-
         cvss_score = None
+        metrics = cve.get("metrics", {}) or {}
 
-        metrics = cve.get(
-            "metrics",
-            {}
-        )
-
-        # ----------------------------------------------------
-        # CVSS 4.0
-        # ----------------------------------------------------
-
-        cvss_v40 = metrics.get(
-            "cvssMetricV40",
-            []
-        )
-
-        if cvss_v40:
-
-            metric = cvss_v40[0]
-
-            cvss_data = metric.get(
-                "cvssData",
-                {}
-            )
-
-            severity = cvss_data.get(
-                "baseSeverity"
-            )
-
-            cvss_score = cvss_data.get(
-                "baseScore"
-            )
-
-        # ----------------------------------------------------
-        # CVSS 3.1
-        # ----------------------------------------------------
+        for metric_key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
+            metrics_list = metrics.get(metric_key, []) or []
+            if not metrics_list:
+                continue
+            cvss_data = metrics_list[0].get("cvssData", {}) or {}
+            severity = cvss_data.get("baseSeverity")
+            cvss_score = cvss_data.get("baseScore")
+            if cvss_score is not None:
+                break
 
         if cvss_score is None:
-
-            cvss_v31 = metrics.get(
-                "cvssMetricV31",
-                []
-            )
-
-            if cvss_v31:
-
-                metric = cvss_v31[0]
-
-                cvss_data = metric.get(
-                    "cvssData",
-                    {}
-                )
-
-                severity = cvss_data.get(
-                    "baseSeverity"
-                )
-
-                cvss_score = cvss_data.get(
-                    "baseScore"
-                )
-
-        # ----------------------------------------------------
-        # CVSS 3.0
-        # ----------------------------------------------------
-
-        if cvss_score is None:
-
-            cvss_v30 = metrics.get(
-                "cvssMetricV30",
-                []
-            )
-
-            if cvss_v30:
-
-                metric = cvss_v30[0]
-
-                cvss_data = metric.get(
-                    "cvssData",
-                    {}
-                )
-
-                severity = cvss_data.get(
-                    "baseSeverity"
-                )
-
-                cvss_score = cvss_data.get(
-                    "baseScore"
-                )
-
-        # ----------------------------------------------------
-        # CVSS 2.0 fallback
-        # ----------------------------------------------------
-
-        if cvss_score is None:
-
-            cvss_v2 = metrics.get(
-                "cvssMetricV2",
-                []
-            )
-
-            if cvss_v2:
-
-                metric = cvss_v2[0]
-
-                cvss_data = metric.get(
-                    "cvssData",
-                    {}
-                )
-
-                cvss_score = cvss_data.get(
-                    "baseScore"
-                )
-
-                severity = metric.get(
-                    "baseSeverity"
-                )
-
-        # ----------------------------------------------------
-        # Store vulnerability
-        # ----------------------------------------------------
+            metrics_v2 = metrics.get("cvssMetricV2", []) or []
+            if metrics_v2:
+                metric = metrics_v2[0]
+                cvss_data = metric.get("cvssData", {}) or {}
+                cvss_score = cvss_data.get("baseScore")
+                severity = metric.get("baseSeverity")
 
         vulnerabilities.append({
-
             "cve_id": cve_id,
-
             "description": description,
-
             "severity": severity,
-
             "cvss_score": cvss_score,
-
-            "cpe_name": cpe_name
-
+            "cpe_name": cpe_name,
         })
 
     return vulnerabilities
