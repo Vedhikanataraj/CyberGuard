@@ -376,18 +376,6 @@ async function downloadReportPdf() {
   // VALUES
   // ============================================================
 
-  const summary = scan.summary || {};
-
-  const totalFindings =
-    summary.total ??
-    (
-      (summary.critical || 0) +
-      (summary.high || 0) +
-      (summary.medium || 0) +
-      (summary.low || 0) +
-      (summary.informational || 0)
-    );
-
   const scanType =
     String(scan.scan_type || "full").toLowerCase();
 
@@ -400,10 +388,204 @@ async function downloadReportPdf() {
   const risk =
     scan.risk_level || "Unknown";
 
-  const findings =
+  const network =
+    scan.network_scan &&
+    typeof scan.network_scan === "object"
+      ? scan.network_scan
+      : {};
+
+  const webScan =
+    scan.web_scan &&
+    typeof scan.web_scan === "object"
+      ? scan.web_scan
+      : {};
+
+  const networkVulnerabilities =
+    Array.isArray(scan.vulnerabilities)
+      ? scan.vulnerabilities
+      : Array.isArray(network.vulnerabilities)
+      ? network.vulnerabilities
+      : [];
+
+  const storedFindings =
     Array.isArray(scan.findings)
       ? scan.findings
       : [];
+
+  const webFindings =
+    Array.isArray(scan.web_findings)
+      ? scan.web_findings
+      : Array.isArray(webScan.findings)
+      ? webScan.findings
+      : [];
+
+  const findings = [
+    ...storedFindings,
+    ...webFindings,
+  ].filter((finding, index, array) => {
+    const signature = [
+      finding?.title || "",
+      finding?.severity || "",
+      finding?.category || "",
+      finding?.description || "",
+    ].join("|");
+
+    return (
+      index ===
+      array.findIndex((item) => {
+        const itemSignature = [
+          item?.title || "",
+          item?.severity || "",
+          item?.category || "",
+          item?.description || "",
+        ].join("|");
+
+        return itemSignature === signature;
+      })
+    );
+  });
+
+  const openPorts =
+    Array.isArray(scan.open_ports)
+      ? scan.open_ports
+      : Array.isArray(network.open_ports)
+      ? network.open_ports
+      : [];
+
+  const osDetection =
+    scan.os_detection || network.os_detection || {};
+
+  const cpeRecords =
+    Array.isArray(scan.cpe_records)
+      ? scan.cpe_records
+      : Array.isArray(network.cpe_records)
+      ? network.cpe_records
+      : [];
+
+  const addresses =
+    Array.isArray(scan.addresses)
+      ? scan.addresses
+      : Array.isArray(scan.target_info?.addresses)
+      ? scan.target_info.addresses
+      : Array.isArray(network.addresses)
+      ? network.addresses
+      : [];
+
+  const securityHeaders =
+    Array.isArray(scan.security_headers)
+      ? scan.security_headers
+      : Array.isArray(webScan.security_headers)
+      ? webScan.security_headers
+      : Array.isArray(webScan.headers_checked)
+      ? webScan.headers_checked
+      : [];
+
+  const headersChecked =
+    Array.isArray(scan.headers_checked)
+      ? scan.headers_checked
+      : Array.isArray(webScan.headers_checked)
+      ? webScan.headers_checked
+      : securityHeaders;
+
+  const headerFindings = webFindings.filter((finding) => {
+    const category =
+      String(finding?.category || "").toLowerCase();
+
+    const title =
+      String(finding?.title || "").toLowerCase();
+
+    return (
+      category.includes("security misconfiguration") ||
+      title.includes("missing") &&
+        (
+          title.includes("header") ||
+          title.includes("content-security") ||
+          title.includes("strict-transport") ||
+          title.includes("x-content") ||
+          title.includes("x-frame") ||
+          title.includes("referrer")
+        )
+    );
+  });
+
+  const missingHeaderFindings =
+    headerFindings.filter((finding) =>
+      String(finding?.title || "")
+        .toLowerCase()
+        .includes("missing")
+    );
+
+  const cveSummary = {
+    critical: networkVulnerabilities.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "CRITICAL"
+    ).length,
+    high: networkVulnerabilities.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "HIGH"
+    ).length,
+    medium: networkVulnerabilities.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "MEDIUM"
+    ).length,
+    low: networkVulnerabilities.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "LOW"
+    ).length,
+    informational: networkVulnerabilities.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "INFORMATIONAL"
+    ).length,
+  };
+
+  const webSummary = {
+    critical: webFindings.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "CRITICAL"
+    ).length,
+    high: webFindings.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "HIGH"
+    ).length,
+    medium: webFindings.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "MEDIUM"
+    ).length,
+    low: webFindings.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "LOW"
+    ).length,
+    informational: webFindings.filter(
+      (item) =>
+        String(item?.severity || "").toUpperCase() ===
+        "INFORMATIONAL"
+    ).length,
+  };
+
+  const combinedSummary = {
+    critical: cveSummary.critical + webSummary.critical,
+    high: cveSummary.high + webSummary.high,
+    medium: cveSummary.medium + webSummary.medium,
+    low: cveSummary.low + webSummary.low,
+    informational:
+      cveSummary.informational +
+      webSummary.informational,
+  };
+
+  const totalCves = networkVulnerabilities.length;
+
+  const totalFindings =
+    totalCves +
+    findings.length;
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#020907] pb-10">
@@ -625,31 +807,31 @@ async function downloadReportPdf() {
 
           <SeverityCard
             label="Critical"
-            value={summary.critical || 0}
+            value={combinedSummary.critical}
             className="text-red-400"
           />
 
           <SeverityCard
             label="High"
-            value={summary.high || 0}
+            value={combinedSummary.high}
             className="text-orange-400"
           />
 
           <SeverityCard
             label="Medium"
-            value={summary.medium || 0}
+            value={combinedSummary.medium}
             className="text-yellow-400"
           />
 
           <SeverityCard
             label="Low"
-            value={summary.low || 0}
+            value={combinedSummary.low}
             className="text-blue-400"
           />
 
           <SeverityCard
             label="Informational"
-            value={summary.informational || 0}
+            value={combinedSummary.informational}
             className="text-[#34D399]"
           />
 
@@ -659,61 +841,722 @@ async function downloadReportPdf() {
 
 
       {/* ======================================================
-          FINDINGS
+          ASSET / NETWORK DETAILS
       ======================================================= */}
 
       <div className="mt-5 rounded-xl border border-[#12382D] bg-[#071A14]">
 
         <div className="border-b border-[#12382D] px-6 py-5">
+          <h2 className="font-semibold text-white">
+            Asset & Network Discovery
+          </h2>
 
+          <p className="mt-1 text-xs text-[#557A6D]">
+            Complete host, operating-system, address, CPE and port information.
+          </p>
+        </div>
+
+        <div className="p-6">
+
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+
+            <InfoItem
+              label="Hostname"
+              value={
+                scan.hostname ||
+                network.hostname ||
+                "—"
+              }
+            />
+
+            <InfoItem
+              label="IP Address"
+              value={
+                scan.ip_address ||
+                network.ip_address ||
+                scan.target_info?.ip_address ||
+                "—"
+              }
+            />
+
+            <InfoItem
+              label="Port Range"
+              value={
+                scan.port_range ||
+                network.scan_scope ||
+                "—"
+              }
+            />
+
+            <InfoItem
+              label="Scan Technique"
+              value={
+                scan.scan_technique ||
+                network.scan_technique ||
+                "—"
+              }
+            />
+
+          </div>
+
+          {addresses.length > 0 && (
+            <div className="mt-5 rounded-lg border border-[#12382D] bg-[#04130F] p-4">
+              <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+                Resolved Addresses
+              </p>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {addresses.map((address, index) => (
+                  <span
+                    key={`${String(address)}-${index}`}
+                    className="rounded-md border border-[#0E4037] bg-[#000B08] px-3 py-1.5 font-mono text-xs text-[#39F0A8]"
+                  >
+                    {typeof address === "string"
+                      ? address
+                      : JSON.stringify(address)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-5 rounded-lg border border-[#12382D] bg-[#04130F] p-4">
+            <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+              Operating System
+            </p>
+
+            <p className="mt-2 text-sm font-medium text-white">
+              {osDetection?.name || "Unknown"}
+            </p>
+
+            {osDetection &&
+              typeof osDetection === "object" &&
+              Object.entries(osDetection).length > 0 && (
+                <pre className="mt-3 overflow-x-auto rounded-lg bg-[#000B08] p-3 font-mono text-xs leading-5 text-[#91B8AD]">
+                  {JSON.stringify(osDetection, null, 2)}
+                </pre>
+              )}
+          </div>
+
+          {cpeRecords.length > 0 && (
+            <div className="mt-5">
+              <p className="text-sm font-semibold text-white">
+                Detected CPEs
+              </p>
+
+              <div className="mt-3 space-y-3">
+                {cpeRecords.map((record, index) => (
+                  <div
+                    key={`${record?.cpe || "cpe"}-${index}`}
+                    className="rounded-lg border border-[#12382D] bg-[#04130F] p-4"
+                  >
+                    <div className="flex flex-wrap gap-2">
+                      {record?.port != null && (
+                        <span className="rounded-md border border-[#0E4037] bg-[#000B08] px-2.5 py-1 font-mono text-xs text-[#39F0A8]">
+                          Port {record.port}
+                        </span>
+                      )}
+
+                      {record?.service && (
+                        <span className="rounded-md border border-[#0E4037] bg-[#000B08] px-2.5 py-1 text-xs text-[#91B8AD]">
+                          {record.service}
+                        </span>
+                      )}
+
+                      {record?.product && (
+                        <span className="rounded-md border border-[#0E4037] bg-[#000B08] px-2.5 py-1 text-xs text-[#91B8AD]">
+                          {record.product}
+                        </span>
+                      )}
+
+                      {record?.version && (
+                        <span className="rounded-md border border-[#0E4037] bg-[#000B08] px-2.5 py-1 font-mono text-xs text-[#91B8AD]">
+                          {record.version}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="mt-3 break-all font-mono text-xs leading-6 text-[#39F0A8]">
+                      {record?.cpe || "—"}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+        </div>
+      </div>
+
+      {/* ======================================================
+          OPEN PORTS
+      ======================================================= */}
+
+      <div className="mt-5 rounded-xl border border-[#12382D] bg-[#071A14]">
+
+        <div className="border-b border-[#12382D] px-6 py-5">
+          <h2 className="font-semibold text-white">
+            Open Ports & Services
+          </h2>
+
+          <p className="mt-1 text-xs text-[#557A6D]">
+            All TCP services returned by the network scanner.
+          </p>
+        </div>
+
+        {openPorts.length === 0 ? (
+          <div className="flex min-h-[140px] items-center justify-center px-6">
+            <p className="text-sm text-[#557A6D]">
+              No open ports were returned.
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-[#0E2C23]">
+            {openPorts.map((port, index) => (
+              <div
+                key={`${port?.port || "port"}-${index}`}
+                className="px-6 py-5"
+              >
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+
+                  <div className="flex items-center gap-4">
+                    <span className="flex h-10 min-w-10 items-center justify-center rounded-lg bg-[#000B08] px-3 font-mono font-semibold text-[#39F0A8]">
+                      {port?.port ?? "—"}
+                    </span>
+
+                    <div>
+                      <p className="text-sm font-semibold text-white">
+                        {port?.service || "Unknown service"}
+                      </p>
+
+                      <p className="mt-1 text-xs text-[#718F84]">
+                        {port?.product || "Unknown product"}
+                        {port?.version
+                          ? ` • ${port.version}`
+                          : ""}
+                        {port?.protocol
+                          ? ` • ${port.protocol}`
+                          : ""}
+                      </p>
+                    </div>
+                  </div>
+
+                  <span className="rounded-md border border-green-500/20 bg-green-500/10 px-2.5 py-1 text-xs font-medium text-green-400">
+                    {port?.state || "open"}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+      </div>
+
+      {/* ======================================================
+          CVE VULNERABILITY ASSESSMENT
+      ======================================================= */}
+
+      <div className="mt-5 rounded-xl border border-[#12382D] bg-[#071A14]">
+
+        <div className="border-b border-[#12382D] px-6 py-5">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+            <div>
+              <h2 className="font-semibold text-white">
+                CVE Vulnerability Assessment
+              </h2>
+
+              <p className="mt-1 text-xs text-[#557A6D]">
+                All CVE records returned by the CPE-to-NVD assessment.
+              </p>
+            </div>
+
+            <span className="rounded-full border border-[#0E4037] bg-[#000B08] px-3 py-1 font-mono text-xs text-[#39F0A8]">
+              {totalCves} CVEs
+            </span>
+          </div>
+        </div>
+
+        <div className="divide-y divide-[#0E2C23]">
+
+          {networkVulnerabilities.length === 0 ? (
+            <div className="flex min-h-[160px] items-center justify-center px-6">
+              <p className="text-sm text-[#557A6D]">
+                No CVE vulnerabilities were returned for this assessment.
+              </p>
+            </div>
+          ) : (
+            networkVulnerabilities.map((vulnerability, index) => (
+              <div
+                key={
+                  vulnerability?.cve_id ||
+                  vulnerability?.id ||
+                  index
+                }
+                className="px-6 py-6"
+              >
+
+                <div className="flex flex-col justify-between gap-4 lg:flex-row">
+
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-mono text-sm font-bold text-[#39F0A8]">
+                        {vulnerability?.cve_id ||
+                          vulnerability?.id ||
+                          "Unknown CVE"}
+                      </p>
+
+                      <SeverityBadge
+                        severity={
+                          vulnerability?.severity
+                        }
+                      />
+                    </div>
+
+                    <p className="mt-3 text-sm font-semibold text-white">
+                      {vulnerability?.title ||
+                        vulnerability?.cve_id ||
+                        "Vulnerability"}
+                    </p>
+                  </div>
+
+                  <div className="shrink-0 text-left lg:text-right">
+                    <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+                      CVSS
+                    </p>
+
+                    <p className="mt-1 font-mono text-xl font-bold text-white">
+                      {vulnerability?.cvss_score ?? "—"}
+                    </p>
+                  </div>
+
+                </div>
+
+                <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+
+                  <InfoItem
+                    label="Affected Product / CPE"
+                    value={
+                      vulnerability?.affected_product ||
+                      vulnerability?.cpe_name ||
+                      "—"
+                    }
+                  />
+
+                  <InfoItem
+                    label="Detected Port"
+                    value={
+                      vulnerability?.port != null
+                        ? vulnerability.port
+                        : "—"
+                    }
+                  />
+
+                  <InfoItem
+                    label="Service / Product"
+                    value={[
+                      vulnerability?.service,
+                      vulnerability?.product,
+                      vulnerability?.version,
+                    ]
+                      .filter(Boolean)
+                      .join(" • ") || "—"}
+                  />
+
+                  <InfoItem
+                    label="CVSS Version"
+                    value={
+                      vulnerability?.cvss_version ||
+                      "—"
+                    }
+                  />
+
+                </div>
+
+                {vulnerability?.cvss_vector && (
+                  <div className="mt-4">
+                    <p className="text-xs text-[#557A6D]">
+                      CVSS Vector
+                    </p>
+
+                    <p className="mt-2 break-all rounded-lg border border-[#12382D] bg-[#000B08] p-3 font-mono text-xs leading-5 text-[#91B8AD]">
+                      {vulnerability.cvss_vector}
+                    </p>
+                  </div>
+                )}
+
+                <div className="mt-5 rounded-lg border border-[#12382D] bg-[#04130F] p-5">
+                  <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+                    Description
+                  </p>
+
+                  <p className="mt-3 whitespace-pre-line text-sm leading-7 text-[#C7DAD4]">
+                    {vulnerability?.description ||
+                      "No CVE description was returned."}
+                  </p>
+                </div>
+
+                <div className="mt-5 grid gap-4 sm:grid-cols-2">
+
+                  <InfoItem
+                    label="Published"
+                    value={
+                      vulnerability?.published_date ||
+                      "—"
+                    }
+                  />
+
+                  <InfoItem
+                    label="Last Modified"
+                    value={
+                      vulnerability?.last_modified_date ||
+                      "—"
+                    }
+                  />
+
+                </div>
+
+                {Array.isArray(vulnerability?.cwe_ids) &&
+                  vulnerability.cwe_ids.length > 0 && (
+                    <div className="mt-4">
+                      <p className="text-xs text-[#557A6D]">
+                        CWE
+                      </p>
+
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {vulnerability.cwe_ids.map(
+                          (cwe, cweIndex) => (
+                            <span
+                              key={`${cwe}-${cweIndex}`}
+                              className="rounded-md border border-[#0E4037] bg-[#000B08] px-2.5 py-1 font-mono text-xs text-[#91B8AD]"
+                            >
+                              {cwe}
+                            </span>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                {Array.isArray(vulnerability?.references) &&
+                  vulnerability.references.length > 0 && (
+                    <div className="mt-5">
+                      <p className="text-xs text-[#557A6D]">
+                        References
+                      </p>
+
+                      <div className="mt-2 space-y-2">
+                        {vulnerability.references.map(
+                          (reference, refIndex) => (
+                            <a
+                              key={`${reference?.url || "reference"}-${refIndex}`}
+                              href={reference?.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block break-all rounded-lg border border-[#0E4037] bg-[#000B08] p-3 font-mono text-xs text-[#39F0A8] transition hover:border-[#00A889]"
+                            >
+                              {reference?.url ||
+                                "Reference"}
+                            </a>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                {(Array.isArray(
+                  vulnerability?.version_conditions
+                ) &&
+                  vulnerability.version_conditions.length > 0) ||
+                  (Array.isArray(
+                    vulnerability?.applicability
+                  ) &&
+                    vulnerability.applicability.length > 0) && (
+                  <details className="mt-5 rounded-lg border border-[#12382D] bg-[#000B08] p-4">
+                    <summary className="cursor-pointer text-xs font-semibold text-[#91B8AD]">
+                      NVD Applicability & Version Conditions
+                    </summary>
+
+                    <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-5 text-[#718F84]">
+                      {JSON.stringify(
+                        {
+                          nvd_exact_cpe_match:
+                            vulnerability?.nvd_exact_cpe_match,
+                          nvd_vulnerable_match:
+                            vulnerability?.nvd_vulnerable_match,
+                          version_conditions:
+                            vulnerability?.version_conditions,
+                          applicability:
+                            vulnerability?.applicability,
+                        },
+                        null,
+                        2
+                      )}
+                    </pre>
+                  </details>
+                )}
+
+              </div>
+            ))
+          )}
+
+        </div>
+      </div>
+
+      {/* ======================================================
+          WEB SECURITY / MISSING HEADERS
+      ======================================================= */}
+
+      <div className="mt-5 rounded-xl border border-[#12382D] bg-[#071A14]">
+
+        <div className="border-b border-[#12382D] px-6 py-5">
+          <h2 className="font-semibold text-white">
+            Web Security & HTTP Headers
+          </h2>
+
+          <p className="mt-1 text-xs text-[#557A6D]">
+            Complete web findings and all security headers checked by the scanner.
+          </p>
+        </div>
+
+        <div className="p-6">
+
+          {headersChecked.length > 0 && (
+            <div>
+              <p className="text-sm font-semibold text-white">
+                Security Headers Checked
+              </p>
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {headersChecked.map((header, index) => {
+                  const headerName =
+                    typeof header === "string"
+                      ? header
+                      : header?.name ||
+                        header?.header ||
+                        JSON.stringify(header);
+
+                  const normalized =
+                    String(headerName).toLowerCase();
+
+                  const missing = missingHeaderFindings.some(
+                    (finding) => {
+                      const title =
+                        String(
+                          finding?.title || ""
+                        ).toLowerCase();
+
+                      return (
+                        title.includes(
+                          normalized.replaceAll(
+                            "-",
+                            "-"
+                          )
+                        ) ||
+                        title.includes(
+                          normalized
+                            .split("-")
+                            .filter(Boolean)
+                            .join(" ")
+                        ) ||
+                        title.includes(
+                          normalized
+                            .replaceAll("-", "")
+                        )
+                        );
+                      
+                    }
+                  );
+
+                  return (
+                    <div
+                      key={`${headerName}-${index}`}
+                      className="flex items-center justify-between gap-3 rounded-lg border border-[#12382D] bg-[#04130F] p-3"
+                    >
+                      <span className="break-all font-mono text-xs text-[#91B8AD]">
+                        {headerName}
+                      </span>
+
+                      <span
+                        className={
+                          missing
+                            ? "shrink-0 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] font-semibold text-red-400"
+                            : "shrink-0 rounded-md border border-green-500/20 bg-green-500/10 px-2 py-1 text-[10px] font-semibold text-green-400"
+                        }
+                      >
+                        {missing ? "Missing" : "No Finding"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {missingHeaderFindings.length > 0 && (
+            <div className="mt-6">
+              <p className="text-sm font-semibold text-white">
+                Missing Security Headers
+              </p>
+
+              <div className="mt-3 divide-y divide-[#0E2C23] rounded-xl border border-[#12382D] bg-[#04130F]">
+                {missingHeaderFindings.map(
+                  (finding, index) => (
+                    <div
+                      key={`${finding?.title || "missing-header"}-${index}`}
+                      className="p-4"
+                    >
+                      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                        <div>
+                          <p className="text-sm font-semibold text-white">
+                            {finding?.title ||
+                              "Missing Security Header"}
+                          </p>
+
+                          <p className="mt-1 text-xs text-[#557A6D]">
+                            {finding?.category ||
+                              "Security Misconfiguration"}
+                          </p>
+                        </div>
+
+                        <SeverityBadge
+                          severity={finding?.severity}
+                        />
+                      </div>
+
+                      {finding?.description && (
+                        <p className="mt-3 text-sm leading-6 text-[#718F84]">
+                          {finding.description}
+                        </p>
+                      )}
+
+                      {finding?.recommendation && (
+                        <div className="mt-3 rounded-lg border border-[#12382D] bg-[#000B08] p-3">
+                          <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+                            Recommendation
+                          </p>
+
+                          <p className="mt-1 text-sm leading-6 text-[#A6C4B8]">
+                            {finding.recommendation}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+          {webFindings.length > 0 && (
+            <div className="mt-6">
+              <p className="text-sm font-semibold text-white">
+                Web Security Findings
+              </p>
+
+              <div className="mt-3 divide-y divide-[#0E2C23] rounded-xl border border-[#12382D] bg-[#04130F]">
+                {webFindings.map(
+                  (finding, index) => (
+                    <div
+                      key={`${finding?.title || "web-finding"}-${index}`}
+                      className="p-4"
+                    >
+                      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+                        <div>
+                          <p className="text-sm font-semibold text-white">
+                            {finding?.title ||
+                              `Finding ${index + 1}`}
+                          </p>
+
+                          {finding?.category && (
+                            <p className="mt-1 text-xs text-[#557A6D]">
+                              {finding.category}
+                            </p>
+                          )}
+                        </div>
+
+                        <SeverityBadge
+                          severity={finding?.severity}
+                        />
+                      </div>
+
+                      {finding?.description && (
+                        <p className="mt-3 text-sm leading-6 text-[#718F84]">
+                          {finding.description}
+                        </p>
+                      )}
+
+                      {finding?.recommendation && (
+                        <div className="mt-3 rounded-lg border border-[#12382D] bg-[#000B08] p-3">
+                          <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+                            Recommendation
+                          </p>
+
+                          <p className="mt-1 text-sm leading-6 text-[#A6C4B8]">
+                            {finding.recommendation}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+          {webScan?.error && (
+            <div className="mt-5 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4">
+              <p className="text-xs font-semibold text-yellow-300">
+                Web Scan Notice
+              </p>
+
+              <p className="mt-1 text-xs leading-5 text-yellow-200/70">
+                {webScan.error}
+              </p>
+            </div>
+          )}
+
+          {headersChecked.length === 0 &&
+            webFindings.length === 0 &&
+            !webScan?.error && (
+              <p className="text-sm text-[#557A6D]">
+                No web security/header data was returned for this assessment type.
+              </p>
+            )}
+
+        </div>
+      </div>
+
+      {/* ======================================================
+          SECURITY FINDINGS
+      ======================================================= */}
+
+      <div className="mt-5 rounded-xl border border-[#12382D] bg-[#071A14]">
+
+        <div className="border-b border-[#12382D] px-6 py-5">
           <h2 className="font-semibold text-white">
             Security Findings
           </h2>
 
           <p className="mt-1 text-xs text-[#557A6D]">
-            Detailed findings discovered during the assessment.
+            Non-CVE findings discovered during the assessment.
           </p>
-
         </div>
 
         {findings.length === 0 ? (
-
-          <div className="flex min-h-[180px] items-center justify-center px-6">
-
-            <div className="text-center">
-
-              <CheckCircle2
-                size={28}
-                className="mx-auto text-green-400"
-              />
-
-              <p className="mt-3 text-sm font-medium text-white">
-                No security findings detected
-              </p>
-
-              <p className="mt-1 text-xs text-[#557A6D]">
-                The scanner did not return any findings for this assessment.
-              </p>
-
-            </div>
-
+          <div className="flex min-h-[140px] items-center justify-center px-6">
+            <p className="text-sm text-[#557A6D]">
+              No additional non-CVE findings were returned.
+            </p>
           </div>
-
         ) : (
-
           <div className="divide-y divide-[#0E2C23]">
-
             {findings.map((finding, index) => (
-
               <div
                 key={finding.id || index}
                 className="px-6 py-5"
               >
-
                 <div className="flex flex-col justify-between gap-3 lg:flex-row">
-
                   <div>
-
                     <p className="text-sm font-semibold text-white">
                       {finding.title ||
                         `Finding ${index + 1}`}
@@ -724,27 +1567,21 @@ async function downloadReportPdf() {
                         {finding.category}
                       </p>
                     )}
-
                   </div>
 
                   <SeverityBadge
                     severity={finding.severity}
                   />
-
                 </div>
 
                 {finding.description && (
-
                   <p className="mt-4 text-sm leading-6 text-[#718F84]">
                     {finding.description}
                   </p>
-
                 )}
 
                 {finding.recommendation && (
-
                   <div className="mt-4 rounded-lg border border-[#12382D] bg-[#04130F] p-4">
-
                     <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
                       Recommendation
                     </p>
@@ -752,17 +1589,11 @@ async function downloadReportPdf() {
                     <p className="mt-1 text-sm leading-6 text-[#A6C4B8]">
                       {finding.recommendation}
                     </p>
-
                   </div>
-
                 )}
-
               </div>
-
             ))}
-
           </div>
-
         )}
 
       </div>

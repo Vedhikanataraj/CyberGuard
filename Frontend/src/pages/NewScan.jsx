@@ -1224,10 +1224,56 @@ function PortScanReport({ result, target, onReset }) {
             value={os.name || asset.operating_system || "Unknown"}
           />
 
-          <InfoItem
-            label="CPE"
-            value={result.cpe || "Not resolved"}
-          />
+          <div className="sm:col-span-2 lg:col-span-4">
+            <p className="text-xs text-[#67927E]">
+              Detected CPEs
+            </p>
+
+            {result.cpe_records?.length ? (
+              <div className="mt-3 space-y-3">
+                {result.cpe_records.map((record, index) => (
+                  <div
+                    key={`${record.cpe || "cpe"}-${index}`}
+                    className="rounded-lg border border-[#0B3B2B] bg-[#04120E] p-4"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      {record.port && (
+                        <span className="rounded-md bg-[#061A13] px-2 py-1 font-mono text-[10px] text-[#39F0A8]">
+                          Port {record.port}
+                        </span>
+                      )}
+
+                      {record.service && (
+                        <span className="rounded-md bg-[#061A13] px-2 py-1 text-[10px] text-[#8FBDA9]">
+                          {record.service}
+                        </span>
+                      )}
+
+                      {record.product && (
+                        <span className="rounded-md bg-[#061A13] px-2 py-1 text-[10px] text-[#8FBDA9]">
+                          {record.product}
+                        </span>
+                      )}
+
+                      {record.version && (
+                        <span className="rounded-md bg-[#061A13] px-2 py-1 font-mono text-[10px] text-[#8FBDA9]">
+                          {record.version}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="mt-3 break-all font-mono text-xs leading-5 text-[#39F0A8]">
+                      {record.cpe}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm text-[#5E8A76]">
+                No CPE records were resolved.
+              </p>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1345,7 +1391,7 @@ function VulnerabilitySection({ vulnerabilities, summary }) {
             </p>
           </div>
         ) : (
-          vulnerabilities.slice(0, 20).map(
+          vulnerabilities.map(
             (vulnerability, index) => (
               <div
                 key={`${vulnerability.cve_id || "cve"}-${index}`}
@@ -1386,13 +1432,7 @@ function VulnerabilitySection({ vulnerabilities, summary }) {
         )}
       </div>
 
-      {vulnerabilities.length > 20 && (
-        <div className="border-t border-[#0B3B2B] px-6 py-4">
-          <p className="text-xs text-[#67927E]">
-            Showing first 20 of {vulnerabilities.length} vulnerabilities.
-          </p>
-        </div>
-      )}
+      
     </div>
   );
 }

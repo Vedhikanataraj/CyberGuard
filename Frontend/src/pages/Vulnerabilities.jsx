@@ -8,6 +8,7 @@ import {
   ShieldCheck,
   RefreshCw,
   ExternalLink,
+  X,
 } from "lucide-react";
 
 import { getVulnerabilities } from "../api/cyberguardApi";
@@ -354,6 +355,7 @@ export default function Vulnerabilities() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [severityFilter, setSeverityFilter] = useState("All");
+  const [selectedVulnerability, setSelectedVulnerability] = useState(null);
 
   // ============================================================
   // LOAD VULNERABILITIES
@@ -449,6 +451,18 @@ export default function Vulnerabilities() {
       ).length,
     };
   }, [vulnerabilities]);
+
+  // ============================================================
+  // VIEW VULNERABILITY DETAILS
+  // ============================================================
+
+  function openVulnerabilityDetails(vulnerability) {
+    setSelectedVulnerability(vulnerability);
+  }
+
+  function closeVulnerabilityDetails() {
+    setSelectedVulnerability(null);
+  }
 
   // ============================================================
   // PAGE
@@ -1043,6 +1057,12 @@ export default function Vulnerabilities() {
                           <td className="px-5 py-4">
 
                             <button
+                              type="button"
+                              onClick={() =>
+                                openVulnerabilityDetails(
+                                  vulnerability
+                                )
+                              }
                               className="
                                 inline-flex
                                 items-center
@@ -1062,7 +1082,7 @@ export default function Vulnerabilities() {
                                 hover:bg-[#003D2E]/30
                                 hover:text-[#00E0A3]
                               "
-                              title="View vulnerability"
+                              title="View vulnerability details"
                             >
                               <ExternalLink
                                 size={14}
@@ -1116,6 +1136,424 @@ export default function Vulnerabilities() {
           )}
 
       </div>
+
+      {/* ========================================================
+          VULNERABILITY DETAILS MODAL
+      ======================================================== */}
+
+      {selectedVulnerability && (
+        <div
+          className="
+            fixed
+            inset-0
+            z-50
+            flex
+            items-center
+            justify-center
+            bg-black/70
+            p-4
+            backdrop-blur-sm
+          "
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="vulnerability-details-title"
+          onClick={closeVulnerabilityDetails}
+        >
+          <div
+            className="
+              w-full
+              max-w-4xl
+              max-h-[90vh]
+              overflow-hidden
+              rounded-2xl
+              border
+              border-[#0E4037]
+              bg-[#00100C]
+              shadow-2xl
+            "
+            onClick={(event) =>
+              event.stopPropagation()
+            }
+          >
+
+            {/* MODAL HEADER */}
+
+            <div
+              className="
+                flex
+                items-start
+                justify-between
+                gap-4
+                border-b
+                border-[#0E4037]/70
+                px-6
+                py-5
+              "
+            >
+              <div>
+                <p
+                  className="
+                    text-xs
+                    uppercase
+                    tracking-[0.18em]
+                    text-[#52786D]
+                  "
+                >
+                  Vulnerability Details
+                </p>
+
+                <h2
+                  id="vulnerability-details-title"
+                  className="
+                    mt-2
+                    break-all
+                    font-mono
+                    text-xl
+                    font-bold
+                    text-[#00E0A3]
+                  "
+                >
+                  {selectedVulnerability.cve_id ||
+                    "Unknown CVE"}
+                </h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeVulnerabilityDetails}
+                className="
+                  shrink-0
+                  rounded-lg
+                  border
+                  border-[#0E4037]
+                  bg-[#000B08]
+                  p-2
+                  text-[#789E94]
+                  transition
+                  hover:border-[#00E0A3]
+                  hover:bg-[#003D2E]/30
+                  hover:text-[#00E0A3]
+                "
+                title="Close"
+                aria-label="Close vulnerability details"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* MODAL BODY */}
+
+            <div
+              className="
+                max-h-[calc(90vh-90px)]
+                overflow-y-auto
+                px-6
+                py-6
+              "
+            >
+
+              {/* SUMMARY */}
+
+              <div
+                className="
+                  grid
+                  grid-cols-1
+                  gap-4
+                  sm:grid-cols-2
+                  lg:grid-cols-4
+                "
+              >
+
+                <div
+                  className="
+                    rounded-xl
+                    border
+                    border-[#0E4037]/70
+                    bg-[#000B08]
+                    p-4
+                  "
+                >
+                  <p className="text-xs text-[#52786D]">
+                    Severity
+                  </p>
+
+                  <div className="mt-2">
+                    <SeverityBadge
+                      severity={
+                        selectedVulnerability.severity
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div
+                  className="
+                    rounded-xl
+                    border
+                    border-[#0E4037]/70
+                    bg-[#000B08]
+                    p-4
+                  "
+                >
+                  <p className="text-xs text-[#52786D]">
+                    CVSS Score
+                  </p>
+
+                  <p
+                    className="
+                      mt-2
+                      font-mono
+                      text-xl
+                      font-semibold
+                      text-white
+                    "
+                  >
+                    {selectedVulnerability.cvss_score ??
+                      "—"}
+                  </p>
+                </div>
+
+                <div
+                  className="
+                    rounded-xl
+                    border
+                    border-[#0E4037]/70
+                    bg-[#000B08]
+                    p-4
+                  "
+                >
+                  <p className="text-xs text-[#52786D]">
+                    Asset
+                  </p>
+
+                  <p
+                    className="
+                      mt-2
+                      text-sm
+                      font-semibold
+                      text-white
+                    "
+                  >
+                    Asset #
+                    {selectedVulnerability.asset_id ??
+                      "—"}
+                  </p>
+                </div>
+
+                <div
+                  className="
+                    rounded-xl
+                    border
+                    border-[#0E4037]/70
+                    bg-[#000B08]
+                    p-4
+                  "
+                >
+                  <p className="text-xs text-[#52786D]">
+                    Detected
+                  </p>
+
+                  <p
+                    className="
+                      mt-2
+                      text-sm
+                      text-[#91B8AD]
+                    "
+                  >
+                    {selectedVulnerability.detected_at
+                      ? new Date(
+                          selectedVulnerability.detected_at
+                        ).toLocaleString()
+                      : "—"}
+                  </p>
+                </div>
+
+              </div>
+
+              {/* DESCRIPTION */}
+
+              <div
+                className="
+                  mt-5
+                  rounded-xl
+                  border
+                  border-[#0E4037]/70
+                  bg-[#000B08]
+                  p-5
+                "
+              >
+                <div
+                  className="
+                    flex
+                    items-center
+                    gap-2
+                  "
+                >
+                  <Bug
+                    size={17}
+                    className="text-[#00E0A3]"
+                  />
+
+                  <h3
+                    className="
+                      text-sm
+                      font-semibold
+                      text-white
+                    "
+                  >
+                    Description
+                  </h3>
+                </div>
+
+                <p
+                  className="
+                    mt-4
+                    whitespace-pre-line
+                    text-sm
+                    leading-7
+                    text-[#C7DAD4]
+                  "
+                >
+                  {selectedVulnerability.description ||
+                    "No description is available for this vulnerability."}
+                </p>
+              </div>
+
+              {/* AFFECTED PRODUCT */}
+
+              <div
+                className="
+                  mt-5
+                  rounded-xl
+                  border
+                  border-[#0E4037]/70
+                  bg-[#000B08]
+                  p-5
+                "
+              >
+                <h3
+                  className="
+                    text-sm
+                    font-semibold
+                    text-white
+                  "
+                >
+                  Affected Product
+                </h3>
+
+                <div
+                  className="
+                    mt-3
+                    rounded-lg
+                    border
+                    border-[#0B3027]
+                    bg-[#00100C]
+                    p-4
+                  "
+                >
+                  <p
+                    className="
+                      break-all
+                      font-mono
+                      text-xs
+                      leading-6
+                      text-[#39F0A8]
+                    "
+                  >
+                    {selectedVulnerability.affected_product ||
+                      "—"}
+                  </p>
+                </div>
+              </div>
+
+              {/* TITLE */}
+
+              <div
+                className="
+                  mt-5
+                  rounded-xl
+                  border
+                  border-[#0E4037]/70
+                  bg-[#000B08]
+                  p-5
+                "
+              >
+                <h3
+                  className="
+                    text-sm
+                    font-semibold
+                    text-white
+                  "
+                >
+                  Vulnerability
+                </h3>
+
+                <p
+                  className="
+                    mt-3
+                    text-sm
+                    leading-6
+                    text-[#91B8AD]
+                  "
+                >
+                  {selectedVulnerability.title ||
+                    "—"}
+                </p>
+              </div>
+
+              {/* NVD */}
+
+              {selectedVulnerability.cve_id && (
+                <div
+                  className="
+                    mt-5
+                    flex
+                    flex-wrap
+                    items-center
+                    justify-between
+                    gap-3
+                  "
+                >
+                  <p className="text-xs text-[#52786D]">
+                    CVE reference
+                  </p>
+
+                  <a
+                    href={`https://nvd.nist.gov/vuln/detail/${encodeURIComponent(
+                      selectedVulnerability.cve_id
+                    )}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="
+                      inline-flex
+                      items-center
+                      gap-2
+                      rounded-lg
+                      border
+                      border-[#0E4037]
+                      bg-transparent
+                      px-4
+                      py-2.5
+                      text-xs
+                      font-medium
+                      text-[#91B8AD]
+                      transition
+                      hover:border-[#00E0A3]
+                      hover:bg-[#003D2E]/30
+                      hover:text-[#00E0A3]
+                    "
+                  >
+                    Open NVD Details
+                    <ExternalLink size={14} />
+                  </a>
+                </div>
+              )}
+
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   </div>
   );

@@ -32,6 +32,7 @@ from app.scanners.web_scanner import scan_web
 from app.scanners.port_scanner import scan_ports
 
 from app.scanners.cve_scanner import (
+    normalize_cpe,
     resolve_os_to_cpe,
     resolve_product_to_cpe,
     lookup_cves_by_cpe,
@@ -231,7 +232,9 @@ def normalize_target(target: str):
     # Default HTTP URL
     # --------------------------------------------------------
 
-    web_url = f"https://{target}"
+    # A bare hostname defaults to HTTP because web scans may target port 80.
+    # Explicit http:// or https:// URLs above are preserved unchanged.
+    web_url = f"http://{target}"
 
     return hostname, web_url
 
@@ -387,232 +390,776 @@ def perform_network_scan(
     db,
     current_user,
 ):
-    """Run Nmap, collect host/service/CPE data and query NVD for CVEs."""
+    """
+    Run Nmap, collect host/service/CPE data and query NVD for CVEs.
 
-    result = scan_ports(target=target, port_range=port_range)
+    CPE/CVE flow:
 
-    hostname = result.get("hostname") or target
-    primary_ip = result.get("ip_address") or target
-    addresses = result.get("addresses", []) or []
-    open_ports = result.get("open_ports", []) or []
-    os_detection = result.get("os_detection", {}) or {}
-    operating_system = os_detection.get("name")
+        Nmap service data
+            |
+            +--> raw Nmap CPE (legacy or CPE 2.3)
+            |
+            +--> product/version/service fallback
+            |
+            v
+        normalized CPE 2.3
+            |
+            v
+        NVD CVE lookup
+    """
+
+    # ========================================================
+    # 1. RUN NMAP
+    # ========================================================
+
+    result = scan_ports(
+        target=target,
+        port_range=port_range,
+    )
+
+    # ========================================================
+    # 2. HOST INFORMATION
+    # ========================================================
+
+    hostname = (
+        result.get("hostname")
+        or target
+    )
+
+    primary_ip = (
+        result.get("ip_address")
+        or target
+    )
+
+    addresses = (
+        result.get("addresses", [])
+        or []
+    )
+
+    open_ports = (
+        result.get("open_ports", [])
+        or []
+    )
+
+    os_detection = (
+        result.get("os_detection", {})
+        or {}
+    )
+
+    operating_system = (
+        os_detection.get("name")
+    )
+
+    # ========================================================
+    # 3. UNIQUE SERVICES
+    # ========================================================
 
     services = []
-    for port in open_ports:
-        service = port.get("service")
-        if service and service not in services:
-            services.append(service)
 
-    # --------------------------------------------------------
-    # Resolve CPEs from detected services + OS.
-    # --------------------------------------------------------
+    for port in open_ports:
+
+        service = port.get(
+            "service"
+        )
+
+        if (
+            service
+            and service not in services
+        ):
+            services.append(
+                service
+            )
+
+    # ========================================================
+    # 4. RESOLVE SERVICE CPEs
+    # ========================================================
+
     cpe_records = []
     seen_cpes = set()
+    cpe_errors = []
 
-    def add_cpe(cpe_name, source, port=None, service=None, product=None, version=None):
-        if not cpe_name or cpe_name in seen_cpes:
+    def add_cpe(
+        cpe_name,
+        source,
+        port=None,
+        service=None,
+        product=None,
+        version=None,
+        raw_cpe=None,
+    ):
+        """
+        Add a unique normalized CPE record.
+        """
+
+        if not cpe_name:
             return
-        seen_cpes.add(cpe_name)
+
+        normalized = normalize_cpe(
+            cpe_name
+        )
+
+        if not normalized:
+            return
+
+        if normalized in seen_cpes:
+            return
+
+        seen_cpes.add(
+            normalized
+        )
+
         cpe_records.append({
-            "cpe": cpe_name,
+            "cpe": normalized,
             "source": source,
             "port": port,
             "service": service,
             "product": product,
             "version": version,
+            "raw_cpe": raw_cpe,
         })
 
+    # --------------------------------------------------------
+    # SERVICE CPE RESOLUTION
+    # --------------------------------------------------------
+
     for port in open_ports:
-        raw_cpe = port.get("cpe")
+
+        raw_cpe = port.get(
+            "cpe"
+        )
+
+        product = port.get(
+            "product"
+        )
+
+        version = port.get(
+            "version"
+        )
+
+        service = port.get(
+            "service"
+        )
+
         resolved_cpe = None
+
         try:
-            resolved_cpe = resolve_product_to_cpe(
-                product=port.get("product"),
-                version=port.get("version"),
-                service=port.get("service"),
-                raw_cpe=raw_cpe,
+
+            resolved_cpe = (
+                resolve_product_to_cpe(
+
+                    product=product,
+
+                    version=version,
+
+                    service=service,
+
+                    raw_cpe=raw_cpe,
+                )
             )
-        except RuntimeError:
-            resolved_cpe = None
+
+        except RuntimeError as error:
+
+            cpe_errors.append(
+                (
+                    f"Port {port.get('port')}: "
+                    f"{error}"
+                )
+            )
+
+        # ----------------------------------------------------
+        # Direct normalization fallback
+        # ----------------------------------------------------
+
+        if not resolved_cpe and raw_cpe:
+
+            resolved_cpe = normalize_cpe(
+                raw_cpe
+            )
+
+        # ----------------------------------------------------
+        # Save normalized CPE
+        # ----------------------------------------------------
 
         if resolved_cpe:
-            add_cpe(
-                resolved_cpe,
-                "service",
-                port=port.get("port"),
-                service=port.get("service"),
-                product=port.get("product"),
-                version=port.get("version"),
+
+            normalized_cpe = normalize_cpe(
+                resolved_cpe
             )
-        elif raw_cpe and str(raw_cpe).startswith("cpe:2.3:"):
-            add_cpe(
-                raw_cpe,
-                "nmap",
-                port=port.get("port"),
-                service=port.get("service"),
-                product=port.get("product"),
-                version=port.get("version"),
-            )
+
+            if normalized_cpe:
+
+                port["cpe"] = (
+                    normalized_cpe
+                )
+
+                add_cpe(
+
+                    normalized_cpe,
+
+                    "service",
+
+                    port=port.get(
+                        "port"
+                    ),
+
+                    service=service,
+
+                    product=product,
+
+                    version=version,
+
+                    raw_cpe=raw_cpe,
+                )
+
+    # ========================================================
+    # 5. OS CPE FALLBACK
+    # ========================================================
 
     os_cpe = None
-    if operating_system and operating_system.lower() != "unknown":
-        try:
-            os_cpe = resolve_os_to_cpe(operating_system)
-        except RuntimeError:
-            os_cpe = None
-        if os_cpe:
-            add_cpe(os_cpe, "os", product=operating_system)
 
-    # --------------------------------------------------------
-    # CVE lookup from the best available service/OS CPEs.
-    # Cap unique CPEs to keep scan time bounded.
-    # --------------------------------------------------------
+    if (
+        operating_system
+        and operating_system.lower()
+        != "unknown"
+    ):
+
+        try:
+
+            os_cpe = resolve_os_to_cpe(
+                operating_system
+            )
+
+        except RuntimeError as error:
+
+            cpe_errors.append(
+                f"OS CPE lookup: {error}"
+            )
+
+            os_cpe = None
+
+        if os_cpe:
+
+            add_cpe(
+
+                os_cpe,
+
+                "os",
+
+                product=operating_system,
+            )
+
+    # ========================================================
+    # 6. CVE LOOKUP
+    # ========================================================
+
     saved_vulnerabilities = []
-    cve_error = None
+
+    cve_errors = []
+
+    # Keep the scan bounded when a target exposes
+    # many independently identified products.
     unique_cpes = cpe_records[:12]
 
     for record in unique_cpes:
+
         try:
-            cves = lookup_cves_by_cpe(record["cpe"])
+
+            cves = lookup_cves_by_cpe(
+                record["cpe"]
+            )
+
         except RuntimeError as error:
-            cve_error = str(error)
+
+            cve_errors.append(
+                (
+                    f"{record['cpe']}: "
+                    f"{error}"
+                )
+            )
+
             continue
 
         for cve_data in cves:
-            item = {
-                "cve_id": cve_data.get("cve_id"),
-                "severity": cve_data.get("severity"),
-                "cvss_score": cve_data.get("cvss_score"),
-                "description": cve_data.get("description"),
-                "affected_product": cve_data.get("cpe_name"),
-                "cpe_name": record["cpe"],
-                "source": record.get("source"),
-                "port": record.get("port"),
-                "service": record.get("service"),
-                "product": record.get("product"),
-                "version": record.get("version"),
-            }
-            if item["cve_id"] and not any(
-                existing["cve_id"] == item["cve_id"]
-                and existing.get("cpe_name") == item.get("cpe_name")
-                for existing in saved_vulnerabilities
-            ):
-                saved_vulnerabilities.append(item)
 
-    # --------------------------------------------------------
-    # Persist asset using resolved IP, not hostname.
-    # --------------------------------------------------------
-    ports_json = json.dumps(open_ports)
-    services_json = json.dumps(services)
+            cve_id = (
+                cve_data.get(
+                    "cve_id"
+                )
+            )
+
+            if not cve_id:
+                continue
+
+            item = {
+
+                "cve_id": cve_id,
+
+                "severity": (
+                    cve_data.get(
+                        "severity"
+                    )
+                ),
+
+                "cvss_score": (
+                    cve_data.get(
+                        "cvss_score"
+                    )
+                ),
+
+                "description": (
+                    cve_data.get(
+                        "description"
+                    )
+                ),
+
+                "affected_product": (
+                    cve_data.get(
+                        "cpe_name"
+                    )
+                ),
+
+                "cpe_name": (
+                    record["cpe"]
+                ),
+
+                "source": (
+                    record.get(
+                        "source"
+                    )
+                ),
+
+                "port": (
+                    record.get(
+                        "port"
+                    )
+                ),
+
+                "service": (
+                    record.get(
+                        "service"
+                    )
+                ),
+
+                "product": (
+                    record.get(
+                        "product"
+                    )
+                ),
+
+                "version": (
+                    record.get(
+                        "version"
+                    )
+                ),
+
+                # ------------------------------------------------
+                # Extended NVD metadata
+                # ------------------------------------------------
+                "cvss_version": (
+                    cve_data.get(
+                        "cvss_version"
+                    )
+                ),
+
+                "cvss_vector": (
+                    cve_data.get(
+                        "cvss_vector"
+                    )
+                ),
+
+                "published_date": (
+                    cve_data.get(
+                        "published_date"
+                    )
+                ),
+
+                "last_modified_date": (
+                    cve_data.get(
+                        "last_modified_date"
+                    )
+                ),
+
+                "cwe_ids": (
+                    cve_data.get(
+                        "cwe_ids",
+                        []
+                    )
+                ),
+
+                "references": (
+                    cve_data.get(
+                        "references",
+                        []
+                    )
+                ),
+
+                "nvd_exact_cpe_match": (
+                    cve_data.get(
+                        "nvd_exact_cpe_match"
+                    )
+                ),
+
+                "nvd_vulnerable_match": (
+                    cve_data.get(
+                        "nvd_vulnerable_match"
+                    )
+                ),
+
+                "applicability": (
+                    cve_data.get(
+                        "applicability",
+                        []
+                    )
+                ),
+
+                "version_conditions": (
+                    cve_data.get(
+                        "version_conditions",
+                        []
+                    )
+                ),
+            }
+
+            # ------------------------------------------------
+            # Deduplicate by CVE + CPE.
+            # ------------------------------------------------
+
+            duplicate = any(
+
+                existing.get(
+                    "cve_id"
+                ) == cve_id
+
+                and existing.get(
+                    "cpe_name"
+                ) == item.get(
+                    "cpe_name"
+                )
+
+                for existing
+                in saved_vulnerabilities
+            )
+
+            if not duplicate:
+
+                saved_vulnerabilities.append(
+                    item
+                )
+
+    # ========================================================
+    # 7. PERSIST ASSET
+    # ========================================================
+
+    ports_json = json.dumps(
+        open_ports
+    )
+
+    services_json = json.dumps(
+        services
+    )
 
     asset = (
         db.query(Asset)
         .filter(
-            Asset.ip_address == primary_ip,
-            Asset.user_id == current_user.id,
+            Asset.ip_address
+            == primary_ip,
+
+            Asset.user_id
+            == current_user.id,
         )
         .first()
     )
 
     if asset is None:
+
         asset = Asset(
+
             ip_address=primary_ip,
+
             user_id=current_user.id,
+
             hostname=hostname,
-            operating_system=operating_system,
+
+            operating_system=(
+                operating_system
+            ),
+
             open_ports=ports_json,
+
             services=services_json,
+
             risk_level="Unknown",
+
             last_scanned=datetime.utcnow(),
         )
-        db.add(asset)
-        db.flush()
-    else:
-        asset.hostname = hostname
-        asset.operating_system = operating_system
-        asset.open_ports = ports_json
-        asset.services = services_json
-        asset.last_scanned = datetime.utcnow()
 
-    asset.risk_level = calculate_asset_risk(saved_vulnerabilities)
+        db.add(
+            asset
+        )
+
+        db.flush()
+
+    else:
+
+        asset.hostname = (
+            hostname
+        )
+
+        asset.operating_system = (
+            operating_system
+        )
+
+        asset.open_ports = (
+            ports_json
+        )
+
+        asset.services = (
+            services_json
+        )
+
+        asset.last_scanned = (
+            datetime.utcnow()
+        )
+
+    # ========================================================
+    # 8. ASSET RISK
+    # ========================================================
+
+    asset.risk_level = (
+        calculate_asset_risk(
+            saved_vulnerabilities
+        )
+    )
+
     db.commit()
     db.refresh(asset)
 
-    # Save CVEs into the existing vulnerability table.
+    # ========================================================
+    # 9. SAVE CVEs
+    # ========================================================
+
     for cve_data in saved_vulnerabilities:
-        cve_id = cve_data.get("cve_id")
+
+        cve_id = cve_data.get(
+            "cve_id"
+        )
+
         if not cve_id:
             continue
 
         vulnerability = (
-            db.query(Vulnerability)
+            db.query(
+                Vulnerability
+            )
             .filter(
-                Vulnerability.asset_id == asset.id,
-                Vulnerability.cve_id == cve_id,
+
+                Vulnerability.asset_id
+                == asset.id,
+
+                Vulnerability.cve_id
+                == cve_id,
             )
             .first()
         )
 
         values = {
-            "description": cve_data.get("description"),
-            "severity": cve_data.get("severity"),
+
+            "description": (
+                cve_data.get(
+                    "description"
+                )
+            ),
+
+            "severity": (
+                cve_data.get(
+                    "severity"
+                )
+            ),
+
             "cvss_score": (
-                str(cve_data.get("cvss_score"))
-                if cve_data.get("cvss_score") is not None
+
+                str(
+                    cve_data.get(
+                        "cvss_score"
+                    )
+                )
+
+                if cve_data.get(
+                    "cvss_score"
+                ) is not None
+
                 else None
             ),
-            "affected_product": cve_data.get("cpe_name"),
-            "detected_at": datetime.utcnow(),
+
+            "affected_product": (
+                cve_data.get(
+                    "cpe_name"
+                )
+            ),
+
+            "detected_at": (
+                datetime.utcnow()
+            ),
         }
 
         if vulnerability is None:
-            vulnerability = Vulnerability(
-                asset_id=asset.id,
-                cve_id=cve_id,
-                title=cve_id,
-                **values,
+
+            vulnerability = (
+                Vulnerability(
+
+                    asset_id=asset.id,
+
+                    cve_id=cve_id,
+
+                    title=cve_id,
+
+                    **values,
+                )
             )
-            db.add(vulnerability)
+
+            db.add(
+                vulnerability
+            )
+
         else:
-            vulnerability.title = cve_id
-            for key, value in values.items():
-                setattr(vulnerability, key, value)
+
+            vulnerability.title = (
+                cve_id
+            )
+
+            for key, value in (
+                values.items()
+            ):
+
+                setattr(
+                    vulnerability,
+                    key,
+                    value
+                )
 
     db.commit()
     db.refresh(asset)
 
+    # ========================================================
+    # 10. BUILD RESPONSE
+    # ========================================================
+
     response = {
-        "target": result.get("target", target),
+
+        "target": (
+            result.get(
+                "target",
+                target
+            )
+        ),
+
         "hostname": hostname,
+
         "ip_address": primary_ip,
+
         "addresses": addresses,
-        "port_range": result.get("port_range", port_range),
-        "scan_scope": result.get("scan_scope", port_range),
-        "scan_technique": result.get("scan_technique"),
+
+        "port_range": (
+            result.get(
+                "port_range",
+                port_range
+            )
+        ),
+
+        "scan_scope": (
+            result.get(
+                "scan_scope",
+                port_range
+            )
+        ),
+
+        "scan_technique": (
+            result.get(
+                "scan_technique"
+            )
+        ),
+
         "open_ports": open_ports,
-        "total_open_ports": len(open_ports),
-        "os_detection": os_detection,
-        "cpe": cpe_records[0]["cpe"] if cpe_records else None,
+
+        "total_open_ports": len(
+            open_ports
+        ),
+
+        "os_detection": (
+            os_detection
+        ),
+
+        "cpe": (
+            cpe_records[0]["cpe"]
+            if cpe_records
+            else None
+        ),
+
         "cpe_records": cpe_records,
-        "cve_summary": build_cve_summary(saved_vulnerabilities),
-        "vulnerabilities": saved_vulnerabilities,
+
+        "cve_summary": (
+            build_cve_summary(
+                saved_vulnerabilities
+            )
+        ),
+
+        "vulnerabilities": (
+            saved_vulnerabilities
+        ),
+
         "asset": {
+
             "id": asset.id,
-            "ip_address": asset.ip_address,
-            "hostname": asset.hostname,
-            "operating_system": asset.operating_system,
+
+            "ip_address": (
+                asset.ip_address
+            ),
+
+            "hostname": (
+                asset.hostname
+            ),
+
+            "operating_system": (
+                asset.operating_system
+            ),
+
             "addresses": addresses,
+
             "open_ports": open_ports,
+
             "services": services,
-            "risk_level": asset.risk_level,
-            "last_scanned": asset.last_scanned,
+
+            "risk_level": (
+                asset.risk_level
+            ),
+
+            "last_scanned": (
+                asset.last_scanned
+            ),
+
             "cpe_records": cpe_records,
         },
     }
 
-    if cve_error:
-        response["cve_error"] = cve_error
+    # --------------------------------------------------------
+    # Report CPE/NVD errors without failing the full scan.
+    # --------------------------------------------------------
+
+    if cpe_errors:
+
+        response["cpe_error"] = (
+            "; ".join(
+                cpe_errors
+            )
+        )
+
+    if cve_errors:
+
+        response["cve_error"] = (
+            "; ".join(
+                cve_errors
+            )
+        )
 
     return response
 
@@ -2014,6 +2561,13 @@ def get_scan(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """
+    Return the complete scan snapshot.
+
+    The report intentionally keeps network CVEs separate from
+    normal web findings so the frontend/PDF can display every
+    CVE without treating CVEs as ordinary web findings.
+    """
 
     scan = (
         db.query(Scan)
@@ -2025,154 +2579,579 @@ def get_scan(
     )
 
     if not scan:
-
         raise HTTPException(
             status_code=404,
-            detail="Scan not found."
+            detail="Scan not found.",
         )
+
     # ========================================================
-    # LOAD COMPLETE STORED REPORT
+    # LOAD STORED REPORT
     # ========================================================
 
-    if scan.report_data:
+    report = {}
+
+    stored_report_data = getattr(
+        scan,
+        "report_data",
+        None,
+    )
+
+    if stored_report_data:
 
         try:
-            stored_report = json.loads(
-                scan.report_data
-            )
+            if isinstance(
+                stored_report_data,
+                str,
+            ):
+                report = json.loads(
+                    stored_report_data
+                )
 
-            stored_report["report_data_available"] = True
-
-            return stored_report
+            elif isinstance(
+                stored_report_data,
+                dict,
+            ):
+                report = stored_report_data
 
         except (
             json.JSONDecodeError,
-            TypeError
+            TypeError,
+            ValueError,
         ):
 
             print(
                 "WARNING: Invalid stored report data for",
-                scan.scan_id
+                scan.scan_id,
             )
 
+            report = {}
 
-    
+    if not isinstance(
+        report,
+        dict,
+    ):
+        report = {}
 
-    findings = []
+    # ========================================================
+    # BASIC SCAN FIELDS
+    # ========================================================
 
-    for finding in scan.findings:
+    report["scan_id"] = report.get(
+        "scan_id",
+        scan.scan_id,
+    )
 
-        findings.append({
+    report["status"] = report.get(
+        "status",
+        scan.status,
+    )
 
-            "id":
-                finding.id,
+    report["scan_type"] = report.get(
+        "scan_type",
+        getattr(
+            scan,
+            "scan_type",
+            "full",
+        ),
+    )
 
-            "title":
-                finding.title,
+    report["target"] = report.get(
+        "target",
+        (
+            scan.target.url
+            if scan.target
+            else None
+        ),
+    )
 
-            "severity":
-                finding.severity,
+    report["security_score"] = report.get(
+        "security_score",
+        scan.security_score,
+    )
 
-            "category":
-                finding.category,
+    report["grade"] = report.get(
+        "grade",
+        scan.grade,
+    )
 
-            "description":
-                finding.description,
+    report["risk_level"] = report.get(
+        "risk_level",
+        scan.risk_level,
+    )
 
-            "recommendation":
-                finding.recommendation,
+    report["started_at"] = report.get(
+        "started_at",
+        scan.started_at,
+    )
+
+    report["completed_at"] = report.get(
+        "completed_at",
+        scan.completed_at,
+    )
+
+    report["status_code"] = report.get(
+        "status_code",
+        getattr(
+            scan,
+            "status_code",
+            None,
+        ),
+    )
+
+    report["final_url"] = report.get(
+        "final_url",
+        getattr(
+            scan,
+            "final_url",
+            None,
+        ),
+    )
+
+    # ========================================================
+    # FIND WEB / GENERAL FINDINGS
+    # ========================================================
+
+    stored_findings = report.get(
+        "findings",
+        [],
+    )
+
+    if not isinstance(
+        stored_findings,
+        list,
+    ):
+        stored_findings = []
+
+    web_findings = report.get(
+        "web_findings",
+        [],
+    )
+
+    if not isinstance(
+        web_findings,
+        list,
+    ):
+        web_findings = []
+
+    # Some older reports only have findings in one location.
+    if not web_findings and stored_findings:
+        web_findings = stored_findings[:]
+
+    # ========================================================
+    # NETWORK / CVE DATA
+    # ========================================================
+
+    network = report.get(
+        "network_scan",
+        {},
+    )
+
+    if not isinstance(
+        network,
+        dict,
+    ):
+        network = {}
+
+    vulnerabilities = report.get(
+        "vulnerabilities",
+        network.get(
+            "vulnerabilities",
+            [],
+        ),
+    )
+
+    if not isinstance(
+        vulnerabilities,
+        list,
+    ):
+        vulnerabilities = []
+
+    # ========================================================
+    # DATABASE CVE FALLBACK
+    # ========================================================
+
+    asset_ids = []
+
+    asset_data = report.get(
+        "asset",
+        {},
+    )
+
+    if isinstance(
+        asset_data,
+        dict,
+    ) and asset_data.get("id") is not None:
+
+        asset_ids.append(
+            asset_data.get("id")
+        )
+
+    network_asset = network.get(
+        "asset",
+        {},
+    )
+
+    if isinstance(
+        network_asset,
+        dict,
+    ) and network_asset.get("id") is not None:
+
+        asset_ids.append(
+            network_asset.get("id")
+        )
+
+    asset_ids = list(
+        dict.fromkeys(asset_ids)
+    )
+
+    db_vulnerabilities = []
+
+    if asset_ids:
+
+        db_rows = (
+            db.query(Vulnerability)
+            .join(
+                Asset,
+                Vulnerability.asset_id
+                == Asset.id,
+            )
+            .filter(
+                Vulnerability.asset_id.in_(
+                    asset_ids
+                ),
+                Asset.user_id
+                == current_user.id,
+            )
+            .order_by(
+                Vulnerability.detected_at.asc()
+            )
+            .all()
+        )
+
+        for row in db_rows:
+
+            db_vulnerabilities.append({
+                "id": row.id,
+                "cve_id": row.cve_id,
+                "title": row.title,
+                "severity": row.severity,
+                "cvss_score": row.cvss_score,
+                "description": row.description,
+                "affected_product": (
+                    row.affected_product
+                ),
+                "asset_id": row.asset_id,
+                "detected_at": row.detected_at,
+            })
+
+    # If the snapshot is missing CVEs but DB has them, use DB.
+    if not vulnerabilities and db_vulnerabilities:
+        vulnerabilities = db_vulnerabilities
+
+    # ========================================================
+    # NORMALIZE CVE RECORDS
+    # ========================================================
+
+    normalized_vulnerabilities = []
+
+    seen_cves = set()
+
+    for item in vulnerabilities:
+
+        if not isinstance(
+            item,
+            dict,
+        ):
+            continue
+
+        cve_id = item.get(
+            "cve_id",
+            item.get("id"),
+        )
+
+        if not cve_id:
+            continue
+
+        signature = (
+            str(cve_id),
+            str(
+                item.get(
+                    "cpe_name",
+                    item.get(
+                        "affected_product",
+                        "",
+                    ),
+                )
+            ),
+        )
+
+        if signature in seen_cves:
+            continue
+
+        seen_cves.add(
+            signature
+        )
+
+        normalized = {
+            **item,
+            "cve_id": cve_id,
+        }
+
+        normalized_vulnerabilities.append(
+            normalized
+        )
+
+    vulnerabilities = normalized_vulnerabilities
+
+    # Keep network object synchronized with the top-level data.
+    network["vulnerabilities"] = vulnerabilities
+
+    # ========================================================
+    # NETWORK FIELDS
+    # ========================================================
+
+    for key in (
+        "hostname",
+        "ip_address",
+        "addresses",
+        "port_range",
+        "scan_scope",
+        "scan_technique",
+        "open_ports",
+        "total_open_ports",
+        "os_detection",
+        "cpe",
+        "cpe_records",
+        "asset",
+        "cve_summary",
+    ):
+
+        if key not in network and key in report:
+            network[key] = report.get(
+                key
+            )
+
+    report["network_scan"] = network
+
+    # Mirror important network data at the top level
+    # for frontend compatibility.
+    report["vulnerabilities"] = vulnerabilities
+
+    report["cve_summary"] = (
+        report.get(
+            "cve_summary"
+        )
+        or network.get(
+            "cve_summary",
+            {},
+        )
+        or build_cve_summary(
+            vulnerabilities
+        )
+    )
+
+    report["open_ports"] = report.get(
+        "open_ports",
+        network.get(
+            "open_ports",
+            [],
+        ),
+    )
+
+    report["total_open_ports"] = report.get(
+        "total_open_ports",
+        len(
+            report["open_ports"]
+            if isinstance(
+                report["open_ports"],
+                list,
+            )
+            else []
+        ),
+    )
+
+    report["os_detection"] = report.get(
+        "os_detection",
+        network.get(
+            "os_detection",
+        ),
+    )
+
+    report["cpe_records"] = report.get(
+        "cpe_records",
+        network.get(
+            "cpe_records",
+            [],
+        ),
+    )
+
+    # ========================================================
+    # WEB DATA / SECURITY HEADERS
+    # ========================================================
+
+    web_scan = report.get(
+        "web_scan",
+        {},
+    )
+
+    if not isinstance(
+        web_scan,
+        dict,
+    ):
+        web_scan = {}
+
+    report["web_scan"] = web_scan
+
+    report["web_findings"] = web_findings
+
+    report["security_headers"] = report.get(
+        "security_headers",
+        web_scan.get(
+            "security_headers",
+            [],
+        ),
+    )
+
+    report["headers_checked"] = report.get(
+        "headers_checked",
+        web_scan.get(
+            "headers_checked",
+            [],
+        ),
+    )
+
+    report["header_summary"] = report.get(
+        "header_summary",
+        web_scan.get(
+            "header_summary",
+            {},
+        ),
+    )
+
+    # ========================================================
+    # COMBINED FINDINGS FOR LEGACY CLIENTS
+    # ========================================================
+
+    combined_findings = []
+
+    signatures = set()
+
+    for finding in web_findings:
+
+        if not isinstance(
+            finding,
+            dict,
+        ):
+            continue
+
+        signature = (
+            "finding",
+            finding.get("title"),
+            finding.get("severity"),
+            finding.get("category"),
+            finding.get("description"),
+        )
+
+        if signature in signatures:
+            continue
+
+        signatures.add(
+            signature
+        )
+
+        combined_findings.append(
+            finding
+        )
+
+    for vulnerability in vulnerabilities:
+
+        signature = (
+            "cve",
+            vulnerability.get(
+                "cve_id"
+            ),
+        )
+
+        if signature in signatures:
+            continue
+
+        signatures.add(
+            signature
+        )
+
+        combined_findings.append({
+            "id": vulnerability.get(
+                "id"
+            ),
+            "cve_id": vulnerability.get(
+                "cve_id"
+            ),
+            "title": vulnerability.get(
+                "title"
+            )
+            or vulnerability.get(
+                "cve_id"
+            ),
+            "severity": vulnerability.get(
+                "severity"
+            ),
+            "description": vulnerability.get(
+                "description"
+            ),
+            "category": "CVE Vulnerability",
+            "recommendation": vulnerability.get(
+                "recommendation"
+            ),
+            "cvss_score": vulnerability.get(
+                "cvss_score"
+            ),
+            "affected_product": vulnerability.get(
+                "affected_product"
+            ),
         })
 
+    report["findings"] = combined_findings
+
     # ========================================================
-    # SEVERITY COUNTS
+    # SUMMARY
     # ========================================================
 
-    severity_counts = {
-
+    summary = {
         "critical": 0,
-
         "high": 0,
-
         "medium": 0,
-
         "low": 0,
-
         "informational": 0,
     }
 
-    for finding in findings:
+    for item in combined_findings:
 
-        severity = (
-            finding["severity"] or ""
+        severity = str(
+            item.get(
+                "severity",
+                "informational",
+            )
+            or "informational"
         ).lower()
 
-        if severity in severity_counts:
+        if severity not in summary:
+            severity = "informational"
 
-            severity_counts[
-                severity
-            ] += 1
+        summary[severity] += 1
 
-    # ========================================================
-    # OLD-SCAN FALLBACK RESPONSE
-    # ========================================================
+    summary["total"] = len(
+        combined_findings
+    )
 
-    return {
+    report["summary"] = summary
 
-        "scan_id":
-            scan.scan_id,
+    report["total_findings"] = (
+        len(combined_findings)
+    )
 
-        "status":
-            scan.status,
+    report["report_data_available"] = True
 
-        "scan_type":
-            getattr(
-                scan,
-                "scan_type",
-                "full"
-            ),
-
-        "target":
-            (
-                scan.target.url
-                if scan.target
-                else None
-            ),
-
-        "security_score":
-            scan.security_score,
-
-        "grade":
-            scan.grade,
-
-        "risk_level":
-            scan.risk_level,
-
-        "started_at":
-            scan.started_at,
-
-        "completed_at":
-            scan.completed_at,
-
-        "status_code":
-            scan.status_code,
-
-        "final_url":
-            scan.final_url,
-
-        "summary": {
-
-            **severity_counts,
-
-            "total":
-                len(findings),
-        },
-
-        "findings":
-            findings,
-
-        "report_data_available":
-            False,
-    }
+    return report
 
 
 # ============================================================
@@ -2392,6 +3371,7 @@ def get_vulnerabilities(
     }
 # ============================================================
 # DOWNLOAD SCAN REPORT AS PDF
+# COMPLETE A-Z REPORT
 # ============================================================
 
 @router.get("/scans/{scan_id}/report/pdf")
@@ -2401,19 +3381,33 @@ def download_scan_report_pdf(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Generate and download a detailed CyberGuard security report.
+    Generate a complete CyberGuard PDF containing:
 
-    Supports:
-        - Full Security Scan
-        - Web Security Scan
-        - Port Security Scan
-
-    Uses the stored report_data snapshot when available. Older scans
-    without report_data are rebuilt from the Scan and Finding records.
+        - Scan metadata
+        - Security score / grade / risk
+        - Severity summary
+        - Target information
+        - IP addresses
+        - OS detection
+        - All CPE records
+        - All open ports/services
+        - All CVEs
+        - Full CVE descriptions
+        - CVSS data
+        - CWE IDs
+        - Published / modified dates
+        - CVE references
+        - NVD applicability/version conditions
+        - Web scan results
+        - Security headers checked
+        - Missing-header findings
+        - Web security findings
+        - Score explanation
+        - Recommendations
     """
 
     # ========================================================
-    # 1. FIND SCAN
+    # 1. FIND USER-OWNED SCAN
     # ========================================================
 
     scan = (
@@ -2428,151 +3422,60 @@ def download_scan_report_pdf(
     if not scan:
         raise HTTPException(
             status_code=404,
-            detail="Scan not found."
+            detail="Scan not found.",
         )
 
     # ========================================================
-    # 2. LOAD STORED REPORT OR BUILD FALLBACK REPORT
+    # 2. LOAD REPORT SNAPSHOT
     # ========================================================
+
+    report = {}
 
     stored_report_data = getattr(
         scan,
         "report_data",
-        None
+        None,
     )
 
-    report = None
-
     if stored_report_data:
+
         try:
-            if isinstance(stored_report_data, str):
-                report = json.loads(stored_report_data)
-            elif isinstance(stored_report_data, dict):
-                report = stored_report_data
-            else:
-                raise ValueError(
-                    "Unsupported report data format."
+
+            if isinstance(
+                stored_report_data,
+                str,
+            ):
+                report = json.loads(
+                    stored_report_data
                 )
+
+            elif isinstance(
+                stored_report_data,
+                dict,
+            ):
+                report = stored_report_data
+
         except (
             json.JSONDecodeError,
             TypeError,
             ValueError,
-        ) as error:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Stored report data is invalid: {error}"
-            )
+        ):
+
+            report = {}
+
+    if not isinstance(
+        report,
+        dict,
+    ):
+        report = {}
 
     # ========================================================
-    # 3. FALLBACK FOR OLDER SCANS
-    # ========================================================
-
-    if not isinstance(report, dict):
-
-        fallback_findings = []
-        severity_counts = {
-            "critical": 0,
-            "high": 0,
-            "medium": 0,
-            "low": 0,
-            "informational": 0,
-        }
-
-        for finding in (scan.findings or []):
-
-            severity = str(
-                finding.severity or "informational"
-            ).lower()
-
-            if severity not in severity_counts:
-                severity = "informational"
-
-            severity_counts[severity] += 1
-
-            fallback_findings.append({
-                "id": finding.id,
-                "title": finding.title,
-                "severity": finding.severity,
-                "category": finding.category,
-                "description": finding.description,
-                "recommendation": finding.recommendation,
-            })
-
-        target_url = (
-            scan.target.url
-            if scan.target
-            else "N/A"
-        )
-
-        report = {
-            "scan_id": scan.scan_id,
-            "status": scan.status,
-            "scan_type": getattr(
-                scan,
-                "scan_type",
-                "full"
-            ),
-            "target": target_url,
-            "security_score": scan.security_score,
-            "grade": scan.grade,
-            "risk_level": scan.risk_level,
-            "started_at": scan.started_at,
-            "completed_at": scan.completed_at,
-            "status_code": getattr(scan, "status_code", None),
-            "final_url": getattr(scan, "final_url", None),
-            "summary": {
-                **severity_counts,
-                "total": len(fallback_findings),
-            },
-            "findings": fallback_findings,
-            "web_findings": [],
-            "web_scan": {},
-            "network_scan": {},
-            "open_ports": [],
-            "total_open_ports": 0,
-            "network_vulnerabilities": [],
-            "vulnerabilities": [],
-            "cve_summary": {},
-        }
-
-    # ========================================================
-    # 4. SAFE TEXT HELPER
-    # ========================================================
-
-    def safe(value):
-        """
-        Safely convert arbitrary values to ReportLab text.
-        """
-
-        if value is None:
-            return "N/A"
-
-        text = str(value)
-
-        text = text.replace(
-            "&",
-            "&amp;"
-        )
-
-        text = text.replace(
-            "<",
-            "&lt;"
-        )
-
-        text = text.replace(
-            ">",
-            "&gt;"
-        )
-
-        return text
-
-    # ========================================================
-    # 5. BASIC INFORMATION
+    # 3. BASIC FIELDS
     # ========================================================
 
     scan_id_value = report.get(
         "scan_id",
-        scan.scan_id
+        scan.scan_id,
     )
 
     scan_type = str(
@@ -2581,265 +3484,625 @@ def download_scan_report_pdf(
             getattr(
                 scan,
                 "scan_type",
-                "full"
-            )
+                "full",
+            ),
         )
     ).upper()
 
     target = report.get(
-        "target"
-    )
-
-    if not target:
-        target = (
+        "target",
+        (
             scan.target.url
             if scan.target
             else "N/A"
-        )
+        ),
+    )
 
     status = report.get(
         "status",
-        scan.status
+        scan.status,
     )
 
     score = report.get(
         "security_score",
-        scan.security_score
+        scan.security_score,
     )
 
     grade = report.get(
         "grade",
-        scan.grade
+        scan.grade,
     )
 
     risk = report.get(
         "risk_level",
-        scan.risk_level
+        scan.risk_level,
     )
 
     started_at = report.get(
         "started_at",
-        scan.started_at
+        scan.started_at,
     )
 
     completed_at = report.get(
         "completed_at",
-        scan.completed_at
+        scan.completed_at,
     )
 
     status_code = report.get(
-        "status_code"
+        "status_code",
+        getattr(
+            scan,
+            "status_code",
+            None,
+        ),
     )
 
     final_url = report.get(
-        "final_url"
+        "final_url",
+        getattr(
+            scan,
+            "final_url",
+            None,
+        ),
     )
 
     # ========================================================
-    # 6. SUMMARY
-    # ========================================================
-
-    summary = report.get(
-        "summary",
-        {}
-    )
-
-    if not isinstance(
-        summary,
-        dict
-    ):
-        summary = {}
-
-    # ========================================================
-    # 7. FINDINGS
-    # ========================================================
-
-    findings = report.get(
-        "findings",
-        []
-    )
-
-    if not isinstance(
-        findings,
-        list
-    ):
-        findings = []
-
-    # Some reports may store web findings separately.
-    web_findings = report.get(
-        "web_findings",
-        []
-    )
-
-    if not isinstance(
-        web_findings,
-        list
-    ):
-        web_findings = []
-
-    # Combine without duplicating identical findings.
-    all_findings = []
-
-    for item in findings + web_findings:
-
-        if not isinstance(
-            item,
-            dict
-        ):
-            continue
-
-        signature = (
-            item.get("title"),
-            item.get("severity"),
-            item.get("category"),
-        )
-
-        already_exists = any(
-            (
-                existing.get("title"),
-                existing.get("severity"),
-                existing.get("category"),
-            )
-            == signature
-            for existing in all_findings
-        )
-
-        if not already_exists:
-            all_findings.append(item)
-
-    # ========================================================
-    # 8. WEB DATA
+    # 4. WEB DATA
     # ========================================================
 
     web_scan = report.get(
-        "web_scan"
+        "web_scan",
+        {},
     )
 
     if not isinstance(
         web_scan,
-        dict
+        dict,
     ):
         web_scan = {}
 
+    web_findings = report.get(
+        "web_findings",
+        web_scan.get(
+            "findings",
+            [],
+        ),
+    )
+
+    if not isinstance(
+        web_findings,
+        list,
+    ):
+        web_findings = []
+
+    headers_checked = report.get(
+        "headers_checked",
+        web_scan.get(
+            "headers_checked",
+            [],
+        ),
+    )
+
+    if not isinstance(
+        headers_checked,
+        (
+            list,
+            dict,
+        ),
+    ):
+        headers_checked = []
+
+    security_headers = report.get(
+        "security_headers",
+        web_scan.get(
+            "security_headers",
+            [],
+        ),
+    )
+
+    if not isinstance(
+        security_headers,
+        (
+            list,
+            dict,
+        ),
+    ):
+        security_headers = []
+
+    header_summary = report.get(
+        "header_summary",
+        web_scan.get(
+            "header_summary",
+            {},
+        ),
+    )
+
+    if not isinstance(
+        header_summary,
+        dict,
+    ):
+        header_summary = {}
+
     # ========================================================
-    # 9. NETWORK DATA
+    # 5. NETWORK DATA
     # ========================================================
 
     network = report.get(
-        "network_scan"
+        "network_scan",
+        {},
     )
-
-    if network is None:
-        network = report.get(
-            "network_result"
-        )
-
-    if network is None:
-        network = report.get(
-            "network"
-        )
 
     if not isinstance(
         network,
-        dict
+        dict,
     ):
         network = {}
-
-    # ========================================================
-    # 10. PORT / OS / CPE DATA
-    # ========================================================
 
     open_ports = report.get(
         "open_ports",
         network.get(
             "open_ports",
-            []
-        )
+            [],
+        ),
     )
 
     if not isinstance(
         open_ports,
-        list
+        list,
     ):
         open_ports = []
 
-    total_open_ports = report.get(
-        "total_open_ports",
+    addresses = report.get(
+        "addresses",
         network.get(
-            "total_open_ports",
-            len(open_ports)
-        )
+            "addresses",
+            [],
+        ),
+    )
+
+    if not isinstance(
+        addresses,
+        list,
+    ):
+        addresses = []
+
+    hostname = report.get(
+        "hostname",
+        network.get(
+            "hostname",
+        ),
+    )
+
+    ip_address = report.get(
+        "ip_address",
+        network.get(
+            "ip_address",
+        ),
+    )
+
+    port_range = report.get(
+        "port_range",
+        network.get(
+            "port_range",
+            network.get(
+                "scan_scope",
+            ),
+        ),
+    )
+
+    scan_scope = report.get(
+        "scan_scope",
+        network.get(
+            "scan_scope",
+            port_range,
+        ),
+    )
+
+    scan_technique = report.get(
+        "scan_technique",
+        network.get(
+            "scan_technique",
+        ),
     )
 
     os_detection = report.get(
         "os_detection",
         network.get(
-            "os_detection"
-        )
+            "os_detection",
+        ),
     )
+
+    if os_detection is None:
+        os_detection = {}
 
     cpe = report.get(
         "cpe",
         network.get(
-            "cpe"
-        )
+            "cpe",
+        ),
     )
 
-    hostname = report.get(
-        "hostname"
-    )
-
-    port_range = report.get(
-        "port_range"
-    )
-
-    # ========================================================
-    # 11. CVE / NETWORK VULNERABILITIES
-    # ========================================================
-
-    network_vulnerabilities = network.get(
-        "vulnerabilities",
-        report.get(
-            "vulnerabilities",
-            []
-        )
+    cpe_records = report.get(
+        "cpe_records",
+        network.get(
+            "cpe_records",
+            [],
+        ),
     )
 
     if not isinstance(
-        network_vulnerabilities,
-        list
+        cpe_records,
+        list,
     ):
-        network_vulnerabilities = []
+        cpe_records = []
 
-    cve_summary = network.get(
-        "cve_summary",
+    vulnerabilities = report.get(
+        "vulnerabilities",
+        network.get(
+            "vulnerabilities",
+            [],
+        ),
+    )
+
+    if not isinstance(
+        vulnerabilities,
+        list,
+    ):
+        vulnerabilities = []
+
+    # ========================================================
+    # 6. DATABASE FALLBACK FOR CVES
+    # ========================================================
+
+    asset_ids = []
+
+    for candidate in (
+        report.get("asset"),
+        network.get("asset"),
+    ):
+
+        if isinstance(
+            candidate,
+            dict,
+        ) and candidate.get("id") is not None:
+
+            asset_ids.append(
+                candidate.get("id")
+            )
+
+    asset_ids = list(
+        dict.fromkeys(
+            asset_ids
+        )
+    )
+
+    if not vulnerabilities and asset_ids:
+
+        db_rows = (
+            db.query(Vulnerability)
+            .join(
+                Asset,
+                Vulnerability.asset_id
+                == Asset.id,
+            )
+            .filter(
+                Vulnerability.asset_id.in_(
+                    asset_ids
+                ),
+                Asset.user_id
+                == current_user.id,
+            )
+            .order_by(
+                Vulnerability.detected_at.asc()
+            )
+            .all()
+        )
+
+        vulnerabilities = []
+
+        for row in db_rows:
+
+            vulnerabilities.append({
+                "id": row.id,
+                "cve_id": row.cve_id,
+                "title": row.title,
+                "severity": row.severity,
+                "cvss_score": row.cvss_score,
+                "description": row.description,
+                "affected_product": (
+                    row.affected_product
+                ),
+                "asset_id": row.asset_id,
+                "detected_at": row.detected_at,
+            })
+
+    # ========================================================
+    # 7. DATABASE CVE FALLBACK BY SCAN ASSET ID / IP / HOSTNAME
+    # ========================================================
+
+    # The CVEs are stored under Asset -> Vulnerability, while
+    # the Scan record itself does not have a vulnerability
+    # relationship. Older/newer report snapshots can therefore
+    # contain the correct score but omit the CVE array.
+    #
+    # Recover the CVEs for this exact user's scanned asset.
+    # Prefer the stored asset ID, then the resolved IP, then the
+    # hostname. This prevents mixing another user's records.
+
+    if not vulnerabilities:
+
+        candidate_asset_ids = []
+
+        for candidate in (
+            report.get("asset"),
+            network.get("asset"),
+        ):
+
+            if (
+                isinstance(candidate, dict)
+                and candidate.get("id") is not None
+            ):
+                candidate_asset_ids.append(
+                    candidate.get("id")
+                )
+
+        candidate_asset_ids = list(
+            dict.fromkeys(candidate_asset_ids)
+        )
+
+        matched_assets = []
+
+        # ----------------------------------------------------
+        # Exact stored asset ID
+        # ----------------------------------------------------
+
+        if candidate_asset_ids:
+
+            matched_assets = (
+                db.query(Asset)
+                .filter(
+                    Asset.user_id == current_user.id,
+                    Asset.id.in_(candidate_asset_ids),
+                )
+                .all()
+            )
+
+        # ----------------------------------------------------
+        # Exact resolved IP fallback
+        # ----------------------------------------------------
+
+        if not matched_assets and ip_address:
+
+            matched_assets = (
+                db.query(Asset)
+                .filter(
+                    Asset.user_id == current_user.id,
+                    Asset.ip_address == str(ip_address),
+                )
+                .order_by(
+                    Asset.last_scanned.desc()
+                )
+                .all()
+            )
+
+        # ----------------------------------------------------
+        # Exact hostname fallback
+        # ----------------------------------------------------
+
+        if not matched_assets and hostname:
+
+            matched_assets = (
+                db.query(Asset)
+                .filter(
+                    Asset.user_id == current_user.id,
+                    Asset.hostname == str(hostname),
+                )
+                .order_by(
+                    Asset.last_scanned.desc()
+                )
+                .all()
+            )
+
+        # ----------------------------------------------------
+        # Load vulnerabilities from the matched asset
+        # ----------------------------------------------------
+
+        if matched_assets:
+
+            matched_asset = matched_assets[0]
+
+            db_rows = (
+                db.query(Vulnerability)
+                .filter(
+                    Vulnerability.asset_id
+                    == matched_asset.id
+                )
+                .order_by(
+                    Vulnerability.detected_at.asc()
+                )
+                .all()
+            )
+
+            for row in db_rows:
+
+                vulnerabilities.append({
+                    "id": row.id,
+                    "cve_id": row.cve_id,
+                    "title": row.title,
+                    "severity": row.severity,
+                    "cvss_score": row.cvss_score,
+                    "description": row.description,
+                    "affected_product": (
+                        row.affected_product
+                    ),
+                    "asset_id": row.asset_id,
+                    "detected_at": row.detected_at,
+                })
+
+    # ========================================================
+    # 8. DEDUPLICATE CVES
+    # ========================================================
+
+    unique_vulnerabilities = []
+    seen_cves = set()
+
+    for vulnerability in vulnerabilities:
+
+        if not isinstance(
+            vulnerability,
+            dict,
+        ):
+            continue
+
+        cve_id = vulnerability.get(
+            "cve_id",
+            vulnerability.get("id"),
+        )
+
+        if not cve_id:
+            continue
+
+        cpe_key = vulnerability.get(
+            "cpe_name",
+            vulnerability.get(
+                "affected_product",
+                "",
+            ),
+        )
+
+        signature = (
+            str(cve_id),
+            str(cpe_key),
+        )
+
+        if signature in seen_cves:
+            continue
+
+        seen_cves.add(
+            signature
+        )
+
+        unique_vulnerabilities.append(
+            vulnerability
+        )
+
+    vulnerabilities = (
+        unique_vulnerabilities
+    )
+
+    # ========================================================
+    # 8. SUMMARY — INCLUDE CVEs + WEB FINDINGS
+    # ========================================================
+
+    summary = {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "informational": 0,
+    }
+
+    summary_items = []
+
+    for item in web_findings:
+        if isinstance(
+            item,
+            dict,
+        ):
+            summary_items.append(
+                item
+            )
+
+    for item in vulnerabilities:
+        if isinstance(
+            item,
+            dict,
+        ):
+            summary_items.append(
+                item
+            )
+
+    for item in summary_items:
+
+        severity = str(
+            item.get(
+                "severity",
+                "informational",
+            )
+            or "informational"
+        ).lower()
+
+        if severity not in summary:
+            severity = "informational"
+
+        summary[severity] += 1
+
+    summary["total"] = len(
+        summary_items
+    )
+
+    cve_summary = (
         report.get(
             "cve_summary",
-            {}
+            network.get(
+                "cve_summary",
+                {},
+            ),
         )
     )
 
     if not isinstance(
         cve_summary,
-        dict
+        dict,
     ):
         cve_summary = {}
 
+    # Always rebuild the CVE summary when the stored summary is
+    # missing or disagrees with the actual CVE records recovered
+    # for this report.
+    if (
+        cve_summary.get("total")
+        != len(vulnerabilities)
+    ):
+        cve_summary = build_cve_summary(
+            vulnerabilities
+        )
+
+    # Keep the report's combined finding count synchronized.
+    report["total_findings"] = (
+        len(web_findings)
+        + len(vulnerabilities)
+    )
+
     # ========================================================
-    # 12. PDF BUFFER
+    # 9. SAFE REPORTLAB TEXT
+    # ========================================================
+
+    def safe(value):
+        if value is None:
+            return "N/A"
+
+        text = str(value)
+
+        return (
+            text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\r\n", "<br/>")
+            .replace("\n", "<br/>")
+        )
+
+    # ========================================================
+    # 10. PDF
     # ========================================================
 
     buffer = BytesIO()
 
-    # ========================================================
-    # 13. PAGE FOOTER
-    # ========================================================
-
     def add_page_number(
         canvas,
-        doc
+        doc,
     ):
-
         canvas.saveState()
 
         width, height = A4
@@ -2854,12 +4117,12 @@ def download_scan_report_pdf(
             15 * mm,
             12 * mm,
             width - 15 * mm,
-            12 * mm
+            12 * mm,
         )
 
         canvas.setFont(
             "Helvetica",
-            7
+            7,
         )
 
         canvas.setFillColor(
@@ -2871,20 +4134,16 @@ def download_scan_report_pdf(
         canvas.drawString(
             15 * mm,
             7 * mm,
-            "CyberGuard Security Assessment"
+            "CyberGuard Security Assessment",
         )
 
         canvas.drawRightString(
             width - 15 * mm,
             7 * mm,
-            f"Page {doc.page}"
+            f"Page {doc.page}",
         )
 
         canvas.restoreState()
-
-    # ========================================================
-    # 14. DOCUMENT
-    # ========================================================
 
     document = SimpleDocTemplate(
         buffer,
@@ -2900,14 +4159,10 @@ def download_scan_report_pdf(
         author="CyberGuard",
     )
 
-    # ========================================================
-    # 15. STYLES
-    # ========================================================
-
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-        "CyberGuardTitle",
+        "CyberGuardTitleAtoZ",
         parent=styles["Title"],
         fontName="Helvetica-Bold",
         fontSize=24,
@@ -2919,21 +4174,8 @@ def download_scan_report_pdf(
         spaceAfter=8 * mm,
     )
 
-    subtitle_style = ParagraphStyle(
-        "CyberGuardSubtitle",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=10,
-        leading=14,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor(
-            "#52786D"
-        ),
-        spaceAfter=10 * mm,
-    )
-
     heading_style = ParagraphStyle(
-        "CyberGuardHeading",
+        "CyberGuardHeadingAtoZ",
         parent=styles["Heading1"],
         fontName="Helvetica-Bold",
         fontSize=16,
@@ -2941,12 +4183,12 @@ def download_scan_report_pdf(
         textColor=colors.HexColor(
             "#063D35"
         ),
-        spaceBefore=4 * mm,
+        spaceBefore=5 * mm,
         spaceAfter=5 * mm,
     )
 
     subheading_style = ParagraphStyle(
-        "CyberGuardSubheading",
+        "CyberGuardSubheadingAtoZ",
         parent=styles["Heading2"],
         fontName="Helvetica-Bold",
         fontSize=11,
@@ -2959,68 +4201,61 @@ def download_scan_report_pdf(
     )
 
     normal_style = ParagraphStyle(
-        "CyberGuardNormal",
+        "CyberGuardNormalAtoZ",
         parent=styles["Normal"],
         fontName="Helvetica",
-        fontSize=9,
-        leading=13,
+        fontSize=8.5,
+        leading=12,
         textColor=colors.HexColor(
             "#263F3B"
         ),
-        spaceAfter=2 * mm,
+        spaceAfter=1.8 * mm,
     )
 
     small_style = ParagraphStyle(
-        "CyberGuardSmall",
+        "CyberGuardSmallAtoZ",
         parent=styles["Normal"],
         fontName="Helvetica",
-        fontSize=7.5,
-        leading=10,
+        fontSize=7,
+        leading=9.5,
         textColor=colors.HexColor(
             "#607D84"
         ),
     )
 
-    score_style = ParagraphStyle(
-        "CyberGuardScore",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=25,
-        leading=28,
-        alignment=TA_CENTER,
-        textColor=colors.HexColor(
-            "#087F6A"
-        ),
-    )
-
-    # ========================================================
-    # 16. STORY
-    # ========================================================
-
     story = []
 
     # ========================================================
-    # COVER / HEADER
+    # 11. COVER
     # ========================================================
 
     story.append(
         Spacer(
             1,
-            12 * mm
+            10 * mm,
         )
     )
 
     story.append(
         Paragraph(
             "CYBERGUARD",
-            title_style
+            title_style,
         )
     )
 
     story.append(
         Paragraph(
             "SECURITY ASSESSMENT REPORT",
-            subtitle_style
+            ParagraphStyle(
+                "CoverSubtitle",
+                parent=normal_style,
+                alignment=TA_CENTER,
+                fontSize=10,
+                textColor=colors.HexColor(
+                    "#52786D"
+                ),
+                spaceAfter=4 * mm,
+            ),
         )
     )
 
@@ -3028,137 +4263,667 @@ def download_scan_report_pdf(
         Paragraph(
             safe(target),
             ParagraphStyle(
-                "Target",
-                parent=subtitle_style,
+                "CoverTarget",
+                parent=normal_style,
+                alignment=TA_CENTER,
                 fontSize=12,
                 textColor=colors.HexColor(
                     "#087F6A"
                 ),
-            )
+                spaceAfter=8 * mm,
+            ),
         )
     )
+
+    # ========================================================
+    # 12. EXECUTIVE OVERVIEW
+    # ========================================================
 
     story.append(
-        Spacer(
-            1,
-            6 * mm
+        Paragraph(
+            "1. Executive Overview",
+            heading_style,
         )
     )
 
-    # ========================================================
-    # REPORT OVERVIEW TABLE
-    # ========================================================
+    overview = [
+        ["Scan ID", scan_id_value],
+        ["Scan Type", scan_type],
+        ["Status", status],
+        ["Target", target],
+        ["Started At", started_at],
+        ["Completed At", completed_at],
+        ["HTTP Status", status_code],
+        ["Final URL", final_url],
+        ["Security Score", score],
+        ["Grade", grade],
+        ["Risk Level", risk],
+        ["Total Findings", summary["total"]],
+        ["Total CVEs", len(vulnerabilities)],
+    ]
 
     overview_rows = [
         [
-            Paragraph(
-                "<b>Scan ID</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(scan_id_value),
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>Scan Type</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(scan_type),
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>Status</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(status),
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>Target</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(target),
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>Started</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(started_at),
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>Completed</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(completed_at),
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>HTTP Status</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(status_code),
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                "<b>Final URL</b>",
-                normal_style
-            ),
-            Paragraph(
-                safe(final_url),
-                normal_style
-            ),
-        ],
+            Paragraph("<b>Property</b>", normal_style),
+            Paragraph("<b>Value</b>", normal_style),
+        ]
     ]
 
-    overview_table = Table(
+    for key, value in overview:
+        overview_rows.append([
+            Paragraph(
+                safe(key),
+                normal_style,
+            ),
+            Paragraph(
+                safe(value),
+                normal_style,
+            ),
+        ])
+
+    table = Table(
         overview_rows,
         colWidths=[
-            45 * mm,
-            125 * mm,
+            55 * mm,
+            115 * mm,
         ],
+        repeatRows=1,
     )
 
-    overview_table.setStyle(
-        TableStyle(
+    table.setStyle(
+        TableStyle([
+            (
+                "BACKGROUND",
+                (0, 0),
+                (-1, 0),
+                colors.HexColor("#0B8F72"),
+            ),
+            (
+                "TEXTCOLOR",
+                (0, 0),
+                (-1, 0),
+                colors.white,
+            ),
+            (
+                "BACKGROUND",
+                (0, 1),
+                (0, -1),
+                colors.HexColor("#E8F3F0"),
+            ),
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.4,
+                colors.HexColor("#A5C8BE"),
+            ),
+            (
+                "VALIGN",
+                (0, 0),
+                (-1, -1),
+                "TOP",
+            ),
+        ])
+    )
+
+    story.append(table)
+
+    # ========================================================
+    # 13. SEVERITY SUMMARY
+    # ========================================================
+
+    story.append(
+        Paragraph(
+            "2. Severity Summary",
+            heading_style,
+        )
+    )
+
+    severity_rows = [
+        [
+            Paragraph("<b>Severity</b>", normal_style),
+            Paragraph("<b>Count</b>", normal_style),
+        ]
+    ]
+
+    for key in (
+        "critical",
+        "high",
+        "medium",
+        "low",
+        "informational",
+    ):
+        severity_rows.append([
+            Paragraph(
+                key.title(),
+                normal_style,
+            ),
+            Paragraph(
+                safe(
+                    summary.get(
+                        key,
+                        0,
+                    )
+                ),
+                normal_style,
+            ),
+        ])
+
+    severity_rows.append([
+        Paragraph("<b>Total</b>", normal_style),
+        Paragraph(
+            f"<b>{safe(summary['total'])}</b>",
+            normal_style,
+        ),
+    ])
+
+    severity_table = Table(
+        severity_rows,
+        colWidths=[
+            130 * mm,
+            40 * mm,
+        ],
+        repeatRows=1,
+    )
+
+    severity_table.setStyle(
+        TableStyle([
+            (
+                "BACKGROUND",
+                (0, 0),
+                (-1, 0),
+                colors.HexColor("#0B8F72"),
+            ),
+            (
+                "TEXTCOLOR",
+                (0, 0),
+                (-1, 0),
+                colors.white,
+            ),
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.4,
+                colors.HexColor("#A5C8BE"),
+            ),
+            (
+                "ALIGN",
+                (1, 1),
+                (1, -1),
+                "CENTER",
+            ),
+        ])
+    )
+
+    story.append(severity_table)
+
+    # ========================================================
+    # 14. TARGET / NETWORK DETAILS
+    # ========================================================
+
+    story.append(
+        PageBreak()
+    )
+
+    story.append(
+        Paragraph(
+            "3. Target and Network Discovery",
+            heading_style,
+        )
+    )
+
+    network_rows = [
+        [
+            Paragraph("<b>Property</b>", normal_style),
+            Paragraph("<b>Value</b>", normal_style),
+        ]
+    ]
+
+    network_properties = [
+        ("Target", target),
+        ("Hostname", hostname),
+        ("IP Address", ip_address),
+        ("Port Range", port_range),
+        ("Scan Scope", scan_scope),
+        ("Scan Technique", scan_technique),
+        (
+            "Operating System",
+            (
+                os_detection.get("name")
+                if isinstance(
+                    os_detection,
+                    dict,
+                )
+                else os_detection
+            ),
+        ),
+        ("Primary CPE", cpe),
+        ("Open Port Count", len(open_ports)),
+    ]
+
+    for key, value in network_properties:
+
+        network_rows.append([
+            Paragraph(
+                safe(key),
+                normal_style,
+            ),
+            Paragraph(
+                safe(value),
+                normal_style,
+            ),
+        ])
+
+    network_table = Table(
+        network_rows,
+        colWidths=[
+            55 * mm,
+            115 * mm,
+        ],
+        repeatRows=1,
+    )
+
+    network_table.setStyle(
+        TableStyle([
+            (
+                "BACKGROUND",
+                (0, 0),
+                (-1, 0),
+                colors.HexColor("#0B8F72"),
+            ),
+            (
+                "TEXTCOLOR",
+                (0, 0),
+                (-1, 0),
+                colors.white,
+            ),
+            (
+                "GRID",
+                (0, 0),
+                (-1, -1),
+                0.4,
+                colors.HexColor("#A5C8BE"),
+            ),
+            (
+                "VALIGN",
+                (0, 0),
+                (-1, -1),
+                "TOP",
+            ),
+        ])
+    )
+
+    story.append(network_table)
+
+    # ========================================================
+    # 15. RESOLVED ADDRESSES
+    # ========================================================
+
+    if addresses:
+
+        story.append(
+            Paragraph(
+                "Resolved Addresses",
+                subheading_style,
+            )
+        )
+
+        address_rows = [
             [
+                Paragraph(
+                    "<b>#</b>",
+                    normal_style,
+                ),
+                Paragraph(
+                    "<b>Address</b>",
+                    normal_style,
+                ),
+            ]
+        ]
+
+        for index, address in enumerate(
+            addresses,
+            start=1,
+        ):
+            address_rows.append([
+                Paragraph(
+                    str(index),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(address),
+                    normal_style,
+                ),
+            ])
+
+        address_table = Table(
+            address_rows,
+            colWidths=[
+                20 * mm,
+                150 * mm,
+            ],
+            repeatRows=1,
+        )
+
+        address_table.setStyle(
+            TableStyle([
                 (
                     "BACKGROUND",
                     (0, 0),
-                    (0, -1),
-                    colors.HexColor(
-                        "#E8F3F0"
-                    ),
+                    (-1, 0),
+                    colors.HexColor("#0B8F72"),
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (-1, 0),
+                    colors.white,
                 ),
                 (
                     "GRID",
                     (0, 0),
                     (-1, -1),
                     0.4,
-                    colors.HexColor(
-                        "#A5C8BE"
+                    colors.HexColor("#A5C8BE"),
+                ),
+            ])
+        )
+
+        story.append(address_table)
+
+    # ========================================================
+    # 16. OPERATING SYSTEM DETAILS
+    # ========================================================
+
+    if isinstance(
+        os_detection,
+        dict,
+    ) and os_detection:
+
+        story.append(
+            Paragraph(
+                "Operating System Detection Details",
+                subheading_style,
+            )
+        )
+
+        os_rows = [
+            [
+                Paragraph("<b>Field</b>", normal_style),
+                Paragraph("<b>Value</b>", normal_style),
+            ]
+        ]
+
+        for key, value in os_detection.items():
+
+            if isinstance(
+                value,
+                (
+                    dict,
+                    list,
+                ),
+            ):
+                value = json.dumps(
+                    value,
+                    default=str,
+                )
+
+            os_rows.append([
+                Paragraph(
+                    safe(key),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(value),
+                    normal_style,
+                ),
+            ])
+
+        os_table = Table(
+            os_rows,
+            colWidths=[
+                55 * mm,
+                115 * mm,
+            ],
+            repeatRows=1,
+        )
+
+        os_table.setStyle(
+            TableStyle([
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.HexColor("#0B8F72"),
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (-1, 0),
+                    colors.white,
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.4,
+                    colors.HexColor("#A5C8BE"),
+                ),
+                (
+                    "VALIGN",
+                    (0, 0),
+                    (-1, -1),
+                    "TOP",
+                ),
+            ])
+        )
+
+        story.append(os_table)
+
+    # ========================================================
+    # 17. CPE INVENTORY
+    # ========================================================
+
+    if cpe_records:
+
+        story.append(
+            Paragraph(
+                "Detected CPE Inventory",
+                subheading_style,
+            )
+        )
+
+        cpe_rows = [
+            [
+                Paragraph("<b>Port</b>", normal_style),
+                Paragraph("<b>Service</b>", normal_style),
+                Paragraph("<b>Product</b>", normal_style),
+                Paragraph("<b>Version</b>", normal_style),
+                Paragraph("<b>CPE</b>", normal_style),
+            ]
+        ]
+
+        for record in cpe_records:
+
+            if not isinstance(
+                record,
+                dict,
+            ):
+                continue
+
+            cpe_rows.append([
+                Paragraph(
+                    safe(record.get("port")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(record.get("service")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(record.get("product")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(record.get("version")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(record.get("cpe")),
+                    small_style,
+                ),
+            ])
+
+        if len(cpe_rows) > 1:
+
+            cpe_table = Table(
+                cpe_rows,
+                colWidths=[
+                    18 * mm,
+                    27 * mm,
+                    35 * mm,
+                    30 * mm,
+                    60 * mm,
+                ],
+                repeatRows=1,
+            )
+
+            cpe_table.setStyle(
+                TableStyle([
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (-1, 0),
+                        colors.HexColor("#0B8F72"),
                     ),
+                    (
+                        "TEXTCOLOR",
+                        (0, 0),
+                        (-1, 0),
+                        colors.white,
+                    ),
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.4,
+                        colors.HexColor("#A5C8BE"),
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "TOP",
+                    ),
+                    (
+                        "FONTSIZE",
+                        (0, 0),
+                        (-1, -1),
+                        7,
+                    ),
+                ])
+            )
+
+            story.append(cpe_table)
+
+    # ========================================================
+    # 18. OPEN PORTS
+    # ========================================================
+
+    story.append(
+        Paragraph(
+            "Open Ports and Services",
+            subheading_style,
+        )
+    )
+
+    if open_ports:
+
+        port_rows = [
+            [
+                Paragraph("<b>Port</b>", normal_style),
+                Paragraph("<b>Protocol</b>", normal_style),
+                Paragraph("<b>State</b>", normal_style),
+                Paragraph("<b>Service</b>", normal_style),
+                Paragraph("<b>Product</b>", normal_style),
+                Paragraph("<b>Version</b>", normal_style),
+            ]
+        ]
+
+        for port in open_ports:
+
+            if not isinstance(
+                port,
+                dict,
+            ):
+                continue
+
+            port_rows.append([
+                Paragraph(
+                    safe(port.get("port")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(port.get("protocol")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(
+                        port.get(
+                            "state",
+                            "open",
+                        )
+                    ),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(port.get("service")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(port.get("product")),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(port.get("version")),
+                    normal_style,
+                ),
+            ])
+
+        port_table = Table(
+            port_rows,
+            colWidths=[
+                17 * mm,
+                23 * mm,
+                23 * mm,
+                32 * mm,
+                38 * mm,
+                37 * mm,
+            ],
+            repeatRows=1,
+        )
+
+        port_table.setStyle(
+            TableStyle([
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.HexColor("#0B8F72"),
+                ),
+                (
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (-1, 0),
+                    colors.white,
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.4,
+                    colors.HexColor("#A5C8BE"),
                 ),
                 (
                     "VALIGN",
@@ -3167,522 +4932,461 @@ def download_scan_report_pdf(
                     "TOP",
                 ),
                 (
-                    "LEFTPADDING",
+                    "FONTSIZE",
                     (0, 0),
                     (-1, -1),
                     7,
                 ),
-                (
-                    "RIGHTPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    7,
-                ),
-                (
-                    "TOPPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    6,
-                ),
-                (
-                    "BOTTOMPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    6,
-                ),
-            ]
-        )
-    )
-
-    story.append(
-        overview_table
-    )
-
-    story.append(
-        Spacer(
-            1,
-            8 * mm
-        )
-    )
-
-    # ========================================================
-    # SECURITY RATING
-    # ========================================================
-
-    story.append(
-        Paragraph(
-            "1. Security Rating",
-            heading_style
-        )
-    )
-
-    rating_rows = [
-        [
-            Paragraph(
-                "<b>SECURITY SCORE</b>",
-                normal_style
-            ),
-            Paragraph(
-                "<b>GRADE</b>",
-                normal_style
-            ),
-            Paragraph(
-                "<b>RISK LEVEL</b>",
-                normal_style
-            ),
-        ],
-        [
-            Paragraph(
-                safe(
-                    f"{score}/100"
-                    if score is not None
-                    else "N/A"
-                ),
-                score_style
-            ),
-            Paragraph(
-                safe(
-                    grade
-                    if grade is not None
-                    else "N/A"
-                ),
-                score_style
-            ),
-            Paragraph(
-                safe(
-                    risk
-                    if risk is not None
-                    else "N/A"
-                ),
-                ParagraphStyle(
-                    "Risk",
-                    parent=score_style,
-                    textColor=(
-                        colors.HexColor(
-                            "#B45309"
-                        )
-                    ),
-                )
-            ),
-        ],
-    ]
-
-    rating_table = Table(
-        rating_rows,
-        colWidths=[
-            56 * mm,
-            56 * mm,
-            58 * mm,
-        ],
-    )
-
-    rating_table.setStyle(
-        TableStyle(
-            [
-                (
-                    "BACKGROUND",
-                    (0, 0),
-                    (-1, 0),
-                    colors.HexColor(
-                        "#0B8F72"
-                    ),
-                ),
-                (
-                    "TEXTCOLOR",
-                    (0, 0),
-                    (-1, 0),
-                    colors.white,
-                ),
-                (
-                    "BACKGROUND",
-                    (0, 1),
-                    (-1, 1),
-                    colors.HexColor(
-                        "#F2F8F6"
-                    ),
-                ),
-                (
-                    "GRID",
-                    (0, 0),
-                    (-1, -1),
-                    0.5,
-                    colors.HexColor(
-                        "#A5C8BE"
-                    ),
-                ),
-                (
-                    "VALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "MIDDLE",
-                ),
-                (
-                    "ALIGN",
-                    (0, 0),
-                    (-1, -1),
-                    "CENTER",
-                ),
-                (
-                    "TOPPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    8,
-                ),
-                (
-                    "BOTTOMPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    8,
-                ),
-            ]
-        )
-    )
-
-    story.append(
-        rating_table
-    )
-
-    # ========================================================
-    # 2. FINDING SUMMARY
-    # ========================================================
-
-    story.append(
-        Paragraph(
-            "2. Vulnerability Summary",
-            heading_style
-        )
-    )
-
-    severity_order = [
-        "critical",
-        "high",
-        "medium",
-        "low",
-        "informational",
-    ]
-
-    summary_rows = [
-        [
-            Paragraph(
-                "<b>Severity</b>",
-                normal_style
-            ),
-            Paragraph(
-                "<b>Count</b>",
-                normal_style
-            ),
-        ]
-    ]
-
-    calculated_total = 0
-
-    for severity in severity_order:
-
-        count = summary.get(
-            severity,
-            0
+            ])
         )
 
-        try:
-            count = int(
-                count or 0
+        story.append(port_table)
+
+    else:
+
+        story.append(
+            Paragraph(
+                "No open ports were returned.",
+                normal_style,
             )
-        except (
-            ValueError,
-            TypeError,
-        ):
-            count = 0
+        )
 
-        calculated_total += count
+    # ========================================================
+    # 19. CVE ASSESSMENT
+    # ========================================================
 
-        summary_rows.append(
+    story.append(
+        PageBreak()
+    )
+
+    story.append(
+        Paragraph(
+            "4. CVE Vulnerability Assessment",
+            heading_style,
+        )
+    )
+
+    # CVE summary
+    if cve_summary:
+
+        cve_summary_rows = [
             [
-                Paragraph(
-                    severity.title(),
-                    normal_style
-                ),
-                Paragraph(
-                    str(count),
-                    normal_style
-                ),
+                Paragraph("<b>Severity</b>", normal_style),
+                Paragraph("<b>Count</b>", normal_style),
             ]
-        )
-
-    total = summary.get(
-        "total",
-        calculated_total
-    )
-
-    try:
-        total = int(
-            total or 0
-        )
-    except (
-        ValueError,
-        TypeError,
-    ):
-        total = calculated_total
-
-    summary_rows.append(
-        [
-            Paragraph(
-                "<b>Total</b>",
-                normal_style
-            ),
-            Paragraph(
-                f"<b>{total}</b>",
-                normal_style
-            ),
         ]
-    )
 
-    summary_table = Table(
-        summary_rows,
-        colWidths=[
-            130 * mm,
-            40 * mm,
-        ],
-        repeatRows=1,
-    )
+        for key, value in cve_summary.items():
 
-    summary_table.setStyle(
-        TableStyle(
-            [
+            cve_summary_rows.append([
+                Paragraph(
+                    safe(
+                        str(key)
+                        .replace("_", " ")
+                        .title()
+                    ),
+                    normal_style,
+                ),
+                Paragraph(
+                    safe(value),
+                    normal_style,
+                ),
+            ])
+
+        cve_table = Table(
+            cve_summary_rows,
+            colWidths=[
+                130 * mm,
+                40 * mm,
+            ],
+            repeatRows=1,
+        )
+
+        cve_table.setStyle(
+            TableStyle([
                 (
                     "BACKGROUND",
                     (0, 0),
                     (-1, 0),
-                    colors.HexColor(
-                        "#0B8F72"
-                    ),
+                    colors.HexColor("#0B8F72"),
                 ),
                 (
                     "TEXTCOLOR",
                     (0, 0),
                     (-1, 0),
                     colors.white,
-                ),
-                (
-                    "BACKGROUND",
-                    (0, 1),
-                    (-1, -1),
-                    colors.HexColor(
-                        "#F6FAF8"
-                    ),
                 ),
                 (
                     "GRID",
                     (0, 0),
                     (-1, -1),
                     0.4,
-                    colors.HexColor(
-                        "#A5C8BE"
+                    colors.HexColor("#A5C8BE"),
+                ),
+            ])
+        )
+
+        story.append(cve_table)
+
+    story.append(
+        Paragraph(
+            f"All detected CVE records: <b>{safe(len(vulnerabilities))}</b>",
+            normal_style,
+        )
+    )
+
+    # Every CVE
+    for index, vulnerability in enumerate(
+        vulnerabilities,
+        start=1,
+    ):
+
+        if not isinstance(
+            vulnerability,
+            dict,
+        ):
+            continue
+
+        cve_id = vulnerability.get(
+            "cve_id",
+            vulnerability.get(
+                "id",
+                "N/A",
+            ),
+        )
+
+        story.append(
+            Paragraph(
+                f"{index}. {safe(cve_id)}",
+                subheading_style,
+            )
+        )
+
+        cve_rows = [
+            ["Severity", vulnerability.get("severity")],
+            ["CVSS Score", vulnerability.get("cvss_score")],
+            ["CVSS Version", vulnerability.get("cvss_version")],
+            ["CVSS Vector", vulnerability.get("cvss_vector")],
+            ["Affected Product", vulnerability.get("affected_product") or vulnerability.get("cpe_name")],
+            ["CPE", vulnerability.get("cpe_name")],
+            ["Detected Port", vulnerability.get("port")],
+            ["Service", vulnerability.get("service")],
+            ["Product", vulnerability.get("product")],
+            ["Version", vulnerability.get("version")],
+            ["Published Date", vulnerability.get("published_date")],
+            ["Last Modified", vulnerability.get("last_modified_date")],
+            ["NVD Exact CPE Match", vulnerability.get("nvd_exact_cpe_match")],
+            ["NVD Vulnerable Match", vulnerability.get("nvd_vulnerable_match")],
+        ]
+
+        if vulnerability.get("cwe_ids"):
+            cve_rows.append([
+                "CWE IDs",
+                ", ".join(
+                    str(value)
+                    for value in vulnerability.get(
+                        "cwe_ids",
+                        [],
+                    )
+                ),
+            ])
+
+        for key, value in cve_rows:
+
+            if value is None:
+                value = "N/A"
+
+            cve_row = Table(
+                [[
+                    Paragraph(
+                        safe(key),
+                        normal_style,
                     ),
+                    Paragraph(
+                        safe(value),
+                        normal_style,
+                    ),
+                ]],
+                colWidths=[
+                    45 * mm,
+                    125 * mm,
+                ],
+            )
+
+            cve_row.setStyle(
+                TableStyle([
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (0, 0),
+                        colors.HexColor("#E8F3F0"),
+                    ),
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.35,
+                        colors.HexColor("#A5C8BE"),
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "TOP",
+                    ),
+                ])
+            )
+
+            story.append(cve_row)
+
+        story.append(
+            Paragraph(
+                "<b>Description</b>",
+                normal_style,
+            )
+        )
+
+        story.append(
+            Paragraph(
+                safe(
+                    vulnerability.get(
+                        "description",
+                        "No description available.",
+                    )
+                ),
+                normal_style,
+            )
+        )
+
+        applicability = vulnerability.get(
+            "applicability",
+            [],
+        )
+
+        version_conditions = vulnerability.get(
+            "version_conditions",
+            [],
+        )
+
+        if applicability or version_conditions:
+
+            story.append(
+                Paragraph(
+                    "<b>NVD Applicability / Version Conditions</b>",
+                    normal_style,
+                )
+            )
+
+            applicability_text = json.dumps(
+                {
+                    "applicability": applicability,
+                    "version_conditions": version_conditions,
+                },
+                default=str,
+                indent=2,
+            )
+
+            story.append(
+                Paragraph(
+                    safe(applicability_text),
+                    small_style,
+                )
+            )
+
+        references = vulnerability.get(
+            "references",
+            [],
+        )
+
+        if references:
+
+            story.append(
+                Paragraph(
+                    "<b>References</b>",
+                    normal_style,
+                )
+            )
+
+            for reference in references:
+
+                if isinstance(
+                    reference,
+                    dict,
+                ):
+                    reference_url = reference.get(
+                        "url"
+                    )
+
+                    reference_source = reference.get(
+                        "source"
+                    )
+
+                    reference_tags = reference.get(
+                        "tags",
+                        [],
+                    )
+
+                    text_parts = [
+                        reference_url,
+                        reference_source,
+                        (
+                            ", ".join(
+                                str(tag)
+                                for tag in reference_tags
+                            )
+                            if reference_tags
+                            else None
+                        ),
+                    ]
+
+                    reference_text = " | ".join(
+                        str(value)
+                        for value in text_parts
+                        if value
+                    )
+
+                else:
+                    reference_text = str(
+                        reference
+                    )
+
+                story.append(
+                    Paragraph(
+                        safe(reference_text),
+                        small_style,
+                    )
+                )
+
+        story.append(
+            Spacer(
+                1,
+                4 * mm,
+            )
+        )
+
+    # ========================================================
+    # 20. WEB SECURITY
+    # ========================================================
+
+    story.append(
+        PageBreak()
+    )
+
+    story.append(
+        Paragraph(
+            "5. Web Security and HTTP Headers",
+            heading_style,
+        )
+    )
+
+    web_basic_rows = [
+        [
+            Paragraph("<b>Property</b>", normal_style),
+            Paragraph("<b>Value</b>", normal_style),
+        ]
+    ]
+
+    for key, value in web_scan.items():
+
+        if isinstance(
+            value,
+            (
+                dict,
+                list,
+            ),
+        ):
+            continue
+
+        web_basic_rows.append([
+            Paragraph(
+                safe(
+                    str(key)
+                    .replace("_", " ")
+                    .title()
+                ),
+                normal_style,
+            ),
+            Paragraph(
+                safe(value),
+                normal_style,
+            ),
+        ])
+
+    if len(web_basic_rows) > 1:
+
+        web_basic_table = Table(
+            web_basic_rows,
+            colWidths=[
+                65 * mm,
+                105 * mm,
+            ],
+            repeatRows=1,
+        )
+
+        web_basic_table.setStyle(
+            TableStyle([
+                (
+                    "BACKGROUND",
+                    (0, 0),
+                    (-1, 0),
+                    colors.HexColor("#0B8F72"),
                 ),
                 (
-                    "ALIGN",
-                    (1, 0),
-                    (1, -1),
-                    "CENTER",
+                    "TEXTCOLOR",
+                    (0, 0),
+                    (-1, 0),
+                    colors.white,
+                ),
+                (
+                    "GRID",
+                    (0, 0),
+                    (-1, -1),
+                    0.4,
+                    colors.HexColor("#A5C8BE"),
                 ),
                 (
                     "VALIGN",
                     (0, 0),
                     (-1, -1),
-                    "MIDDLE",
+                    "TOP",
                 ),
-                (
-                    "TOPPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    6,
-                ),
-                (
-                    "BOTTOMPADDING",
-                    (0, 0),
-                    (-1, -1),
-                    6,
-                ),
-            ]
+            ])
         )
-    )
 
-    story.append(
-        summary_table
-    )
+        story.append(web_basic_table)
 
-    # ========================================================
-    # 3. DETAILED FINDINGS
-    # ========================================================
-
-    story.append(
-        PageBreak()
-    )
-
+    # All headers checked
     story.append(
         Paragraph(
-            "3. Detailed Security Findings",
-            heading_style
+            "All Security Headers Checked",
+            subheading_style,
         )
     )
 
-    if all_findings:
+    header_names = []
 
-        for index, finding in enumerate(
-            all_findings,
-            start=1
-        ):
+    if isinstance(
+        headers_checked,
+        list,
+    ):
+        header_names = headers_checked[:]
 
-            title = finding.get(
-                "title",
-                "Unnamed Finding"
-            )
+    elif isinstance(
+        headers_checked,
+        dict,
+    ):
+        header_names = list(
+            headers_checked.keys()
+        )
 
-            severity = finding.get(
-                "severity",
-                "Unknown"
-            )
+    if header_names:
 
-            category = finding.get(
-                "category",
-                "Uncategorized"
-            )
-
-            description = finding.get(
-                "description",
-                "No description provided."
-            )
-
-            recommendation = finding.get(
-                "recommendation",
-                "No recommendation provided."
-            )
-
-            finding_data = [
-                [
-                    Paragraph(
-                        "<b>Finding</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        safe(
-                            f"#{index} - {title}"
-                        ),
-                        normal_style
-                    ),
-                ],
-                [
-                    Paragraph(
-                        "<b>Severity</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        safe(severity),
-                        normal_style
-                    ),
-                ],
-                [
-                    Paragraph(
-                        "<b>Category</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        safe(category),
-                        normal_style
-                    ),
-                ],
-                [
-                    Paragraph(
-                        "<b>Description</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        safe(description),
-                        normal_style
-                    ),
-                ],
-                [
-                    Paragraph(
-                        "<b>Recommendation</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        safe(recommendation),
-                        normal_style
-                    ),
-                ],
-            ]
-
-            finding_table = Table(
-                finding_data,
-                colWidths=[
-                    35 * mm,
-                    135 * mm,
-                ],
-            )
-
-            finding_table.setStyle(
-                TableStyle(
-                    [
-                        (
-                            "BACKGROUND",
-                            (0, 0),
-                            (0, -1),
-                            colors.HexColor(
-                                "#E8F3F0"
-                            ),
-                        ),
-                        (
-                            "GRID",
-                            (0, 0),
-                            (-1, -1),
-                            0.4,
-                            colors.HexColor(
-                                "#A5C8BE"
-                            ),
-                        ),
-                        (
-                            "VALIGN",
-                            (0, 0),
-                            (-1, -1),
-                            "TOP",
-                        ),
-                        (
-                            "LEFTPADDING",
-                            (0, 0),
-                            (-1, -1),
-                            7,
-                        ),
-                        (
-                            "RIGHTPADDING",
-                            (0, 0),
-                            (-1, -1),
-                            7,
-                        ),
-                        (
-                            "TOPPADDING",
-                            (0, 0),
-                            (-1, -1),
-                            6,
-                        ),
-                        (
-                            "BOTTOMPADDING",
-                            (0, 0),
-                            (-1, -1),
-                            6,
-                        ),
-                    ]
-                )
-            )
+        for header_name in header_names:
 
             story.append(
-                finding_table
-            )
-
-            story.append(
-                Spacer(
-                    1,
-                    6 * mm
+                Paragraph(
+                    f"• {safe(header_name)}",
+                    normal_style,
                 )
             )
 
@@ -3690,773 +5394,459 @@ def download_scan_report_pdf(
 
         story.append(
             Paragraph(
-                "No security findings were returned by this scan.",
-                normal_style
+                "No security-header checklist was returned.",
+                normal_style,
             )
         )
 
-    # ========================================================
-    # 4. WEB SECURITY ASSESSMENT
-    # ========================================================
-
-    if web_scan:
-
-        story.append(
-            PageBreak()
-        )
+    # Header values/status if present
+    if security_headers:
 
         story.append(
             Paragraph(
-                "4. Web Security Assessment",
-                heading_style
+                "Security Header Results",
+                subheading_style,
             )
         )
 
-        # ----------------------------------------------------
-        # WEB SCAN BASIC RESULTS
-        # ----------------------------------------------------
-
-        web_rows = [
+        header_rows = [
             [
-                Paragraph(
-                    "<b>Check</b>",
-                    normal_style
-                ),
-                Paragraph(
-                    "<b>Result</b>",
-                    normal_style
-                ),
+                Paragraph("<b>Header</b>", normal_style),
+                Paragraph("<b>Result</b>", normal_style),
             ]
         ]
 
-        for key, value in web_scan.items():
+        if isinstance(
+            security_headers,
+            dict,
+        ):
 
-            if isinstance(
-                value,
-                (
-                    dict,
-                    list
-                )
+            for key, value in (
+                security_headers.items()
             ):
-                continue
 
-            web_rows.append(
-                [
+                header_rows.append([
                     Paragraph(
-                        safe(
-                            str(key)
-                            .replace(
-                                "_",
-                                " "
-                            )
-                            .title()
-                        ),
-                        normal_style
+                        safe(key),
+                        normal_style,
                     ),
                     Paragraph(
                         safe(value),
-                        normal_style
+                        normal_style,
                     ),
-                ]
-            )
+                ])
 
-        if len(web_rows) > 1:
-
-            web_table = Table(
-                web_rows,
-                colWidths=[
-                    65 * mm,
-                    105 * mm,
-                ],
-                repeatRows=1,
-            )
-
-            web_table.setStyle(
-                TableStyle(
-                    [
-                        (
-                            "BACKGROUND",
-                            (0, 0),
-                            (-1, 0),
-                            colors.HexColor(
-                                "#0B8F72"
-                            ),
-                        ),
-                        (
-                            "TEXTCOLOR",
-                            (0, 0),
-                            (-1, 0),
-                            colors.white,
-                        ),
-                        (
-                            "GRID",
-                            (0, 0),
-                            (-1, -1),
-                            0.4,
-                            colors.HexColor(
-                                "#A5C8BE"
-                            ),
-                        ),
-                        (
-                            "VALIGN",
-                            (0, 0),
-                            (-1, -1),
-                            "TOP",
-                        ),
-                        (
-                            "TOPPADDING",
-                            (0, 0),
-                            (-1, -1),
-                            6,
-                        ),
-                        (
-                            "BOTTOMPADDING",
-                            (0, 0),
-                            (-1, -1),
-                            6,
-                        ),
-                    ]
-                )
-            )
-
-            story.append(
-                web_table
-            )
-
-        # ----------------------------------------------------
-        # HEADER CHECKS
-        # ----------------------------------------------------
-
-        headers_checked = web_scan.get(
-            "headers_checked"
-        )
-
-        if isinstance(
-            headers_checked,
-            dict
+        elif isinstance(
+            security_headers,
+            list,
         ):
 
-            story.append(
-                Paragraph(
-                    "HTTP Security Header Checks",
-                    subheading_style
-                )
-            )
+            for item in security_headers:
 
-            header_rows = [
-                [
+                if isinstance(
+                    item,
+                    dict,
+                ):
+                    name = (
+                        item.get("name")
+                        or item.get("header")
+                        or item.get("key")
+                        or "Header"
+                    )
+
+                    value = (
+                        item.get("status")
+                        or item.get("value")
+                        or item.get("result")
+                        or json.dumps(
+                            item,
+                            default=str,
+                        )
+                    )
+
+                else:
+                    name = str(item)
+                    value = "Checked"
+
+                header_rows.append([
                     Paragraph(
-                        "<b>Header</b>",
-                        normal_style
+                        safe(name),
+                        normal_style,
                     ),
                     Paragraph(
-                        "<b>Status</b>",
-                        normal_style
+                        safe(value),
+                        normal_style,
                     ),
-                ]
-            ]
+                ])
 
-            for header_name, header_value in (
-                headers_checked.items()
-            ):
-
-                header_rows.append(
-                    [
-                        Paragraph(
-                            safe(header_name),
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(header_value),
-                            normal_style
-                        ),
-                    ]
-                )
+        if len(header_rows) > 1:
 
             header_table = Table(
                 header_rows,
                 colWidths=[
-                    85 * mm,
-                    85 * mm,
+                    80 * mm,
+                    90 * mm,
                 ],
                 repeatRows=1,
             )
 
             header_table.setStyle(
-                TableStyle(
-                    [
-                        (
-                            "BACKGROUND",
-                            (0, 0),
-                            (-1, 0),
-                            colors.HexColor(
-                                "#0B8F72"
-                            ),
-                        ),
-                        (
-                            "TEXTCOLOR",
-                            (0, 0),
-                            (-1, 0),
-                            colors.white,
-                        ),
-                        (
-                            "GRID",
-                            (0, 0),
-                            (-1, -1),
-                            0.4,
-                            colors.HexColor(
-                                "#A5C8BE"
-                            ),
-                        ),
-                        (
-                            "VALIGN",
-                            (0, 0),
-                            (-1, -1),
-                            "TOP",
-                        ),
-                    ]
-                )
+                TableStyle([
+                    (
+                        "BACKGROUND",
+                        (0, 0),
+                        (-1, 0),
+                        colors.HexColor("#0B8F72"),
+                    ),
+                    (
+                        "TEXTCOLOR",
+                        (0, 0),
+                        (-1, 0),
+                        colors.white,
+                    ),
+                    (
+                        "GRID",
+                        (0, 0),
+                        (-1, -1),
+                        0.4,
+                        colors.HexColor("#A5C8BE"),
+                    ),
+                    (
+                        "VALIGN",
+                        (0, 0),
+                        (-1, -1),
+                        "TOP",
+                    ),
+                ])
             )
 
-            story.append(
-                header_table
-            )
+            story.append(header_table)
 
-    # ========================================================
-    # 5. NETWORK ASSESSMENT
-    # ========================================================
-
-    if (
-        network
-        or open_ports
-        or os_detection
-        or cpe
-    ):
+    if header_summary:
 
         story.append(
-            PageBreak()
+            Paragraph(
+                "Security Header Summary",
+                subheading_style,
+            )
         )
 
         story.append(
             Paragraph(
-                "5. Network Assessment",
-                heading_style
+                safe(
+                    json.dumps(
+                        header_summary,
+                        default=str,
+                        indent=2,
+                    )
+                ),
+                small_style,
             )
         )
 
-        network_rows = [
-            [
-                Paragraph(
-                    "<b>Property</b>",
-                    normal_style
-                ),
-                Paragraph(
-                    "<b>Value</b>",
-                    normal_style
-                ),
-            ]
-        ]
+    # Missing-header findings
+    missing_headers = []
 
-        network_properties = {
-            "Hostname": hostname,
-            "Port Range": port_range,
-            "Total Open Ports": total_open_ports,
-            "Operating System": (
-                os_detection.get("name")
-                if isinstance(
-                    os_detection,
-                    dict
+    for finding in web_findings:
+
+        if not isinstance(
+            finding,
+            dict,
+        ):
+            continue
+
+        title = str(
+            finding.get(
+                "title",
+                "",
+            )
+        )
+
+        category = str(
+            finding.get(
+                "category",
+                "",
+            )
+        )
+
+        if (
+            "missing" in title.lower()
+            and (
+                "header" in title.lower()
+                or "security misconfiguration"
+                in category.lower()
+            )
+        ):
+            missing_headers.append(
+                finding
+            )
+
+    story.append(
+        Paragraph(
+            "Missing Security Headers",
+            subheading_style,
+        )
+    )
+
+    if missing_headers:
+
+        for finding in missing_headers:
+
+            story.append(
+                Paragraph(
+                    f"<b>{safe(finding.get('title'))}</b>",
+                    normal_style,
                 )
-                else os_detection
-            ),
-            "CPE": cpe,
-        }
+            )
 
-        for property_name, value in (
-            network_properties.items()
+            story.append(
+                Paragraph(
+                    safe(
+                        finding.get(
+                            "description",
+                            "",
+                        )
+                    ),
+                    normal_style,
+                )
+            )
+
+            if finding.get(
+                "recommendation"
+            ):
+                story.append(
+                    Paragraph(
+                        f"<b>Recommendation:</b> "
+                        f"{safe(finding.get('recommendation'))}",
+                        normal_style,
+                    )
+                )
+
+    else:
+
+        story.append(
+            Paragraph(
+                "No missing security-header findings were returned.",
+                normal_style,
+            )
+        )
+
+    # ========================================================
+    # 21. OTHER WEB FINDINGS
+    # ========================================================
+
+    non_header_findings = [
+        finding
+        for finding in web_findings
+        if finding not in missing_headers
+    ]
+
+    if non_header_findings:
+
+        story.append(
+            Paragraph(
+                "Other Web Security Findings",
+                subheading_style,
+            )
+        )
+
+        for index, finding in enumerate(
+            non_header_findings,
+            start=1,
         ):
 
-            if value is None:
-                continue
-
-            network_rows.append(
-                [
-                    Paragraph(
-                        safe(property_name),
-                        normal_style
-                    ),
-                    Paragraph(
-                        safe(value),
-                        normal_style
-                    ),
-                ]
-            )
-
-        if len(network_rows) > 1:
-
-            network_table = Table(
-                network_rows,
-                colWidths=[
-                    65 * mm,
-                    105 * mm,
-                ],
-                repeatRows=1,
-            )
-
-            network_table.setStyle(
-                TableStyle(
-                    [
-                        (
-                            "BACKGROUND",
-                            (0, 0),
-                            (-1, 0),
-                            colors.HexColor(
-                                "#0B8F72"
-                            ),
-                        ),
-                        (
-                            "TEXTCOLOR",
-                            (0, 0),
-                            (-1, 0),
-                            colors.white,
-                        ),
-                        (
-                            "GRID",
-                            (0, 0),
-                            (-1, -1),
-                            0.4,
-                            colors.HexColor(
-                                "#A5C8BE"
-                            ),
-                        ),
-                        (
-                            "VALIGN",
-                            (0, 0),
-                            (-1, -1),
-                            "TOP",
-                        ),
-                    ]
-                )
-            )
-
-            story.append(
-                network_table
-            )
-
-        # ----------------------------------------------------
-        # OPEN PORTS
-        # ----------------------------------------------------
-
-        if open_ports:
-
             story.append(
                 Paragraph(
-                    "Open Ports and Services",
-                    subheading_style
+                    f"{index}. "
+                    f"<b>{safe(finding.get('title', 'Finding'))}</b>",
+                    normal_style,
                 )
             )
 
-            port_rows = [
-                [
+            if finding.get(
+                "severity"
+            ):
+                story.append(
                     Paragraph(
-                        "<b>Port</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        "<b>Protocol</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        "<b>Service</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        "<b>Version</b>",
-                        normal_style
-                    ),
-                ]
-            ]
-
-            for port in open_ports:
-
-                if not isinstance(
-                    port,
-                    dict
-                ):
-                    continue
-
-                port_rows.append(
-                    [
-                        Paragraph(
-                            safe(
-                                port.get(
-                                    "port",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                port.get(
-                                    "protocol",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                port.get(
-                                    "service",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                port.get(
-                                    "version",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                    ]
-                )
-
-            if len(port_rows) > 1:
-
-                port_table = Table(
-                    port_rows,
-                    colWidths=[
-                        25 * mm,
-                        30 * mm,
-                        50 * mm,
-                        65 * mm,
-                    ],
-                    repeatRows=1,
-                )
-
-                port_table.setStyle(
-                    TableStyle(
-                        [
-                            (
-                                "BACKGROUND",
-                                (0, 0),
-                                (-1, 0),
-                                colors.HexColor(
-                                    "#0B8F72"
-                                ),
-                            ),
-                            (
-                                "TEXTCOLOR",
-                                (0, 0),
-                                (-1, 0),
-                                colors.white,
-                            ),
-                            (
-                                "GRID",
-                                (0, 0),
-                                (-1, -1),
-                                0.4,
-                                colors.HexColor(
-                                    "#A5C8BE"
-                                ),
-                            ),
-                            (
-                                "VALIGN",
-                                (0, 0),
-                                (-1, -1),
-                                "TOP",
-                            ),
-                        ]
+                        f"Severity: "
+                        f"{safe(finding.get('severity'))}",
+                        normal_style,
                     )
                 )
 
+            if finding.get(
+                "category"
+            ):
                 story.append(
-                    port_table
+                    Paragraph(
+                        f"Category: "
+                        f"{safe(finding.get('category'))}",
+                        normal_style,
+                    )
+                )
+
+            if finding.get(
+                "description"
+            ):
+                story.append(
+                    Paragraph(
+                        safe(
+                            finding.get(
+                                "description"
+                            )
+                        ),
+                        normal_style,
+                    )
+                )
+
+            if finding.get(
+                "recommendation"
+            ):
+                story.append(
+                    Paragraph(
+                        f"<b>Recommendation:</b> "
+                        f"{safe(finding.get('recommendation'))}",
+                        normal_style,
+                    )
                 )
 
     # ========================================================
-    # 6. CVE / VULNERABILITY ASSESSMENT
+    # 22. SCORE BREAKDOWN
     # ========================================================
 
-    if (
-        network_vulnerabilities
-        or cve_summary
-    ):
+    score_breakdown = report.get(
+        "score_breakdown",
+        {},
+    )
 
-        story.append(
-            PageBreak()
-        )
+    if isinstance(
+        score_breakdown,
+        dict,
+    ) and score_breakdown:
 
         story.append(
             Paragraph(
-                "6. CVE and Vulnerability Assessment",
-                heading_style
+                "6. Score Breakdown",
+                heading_style,
             )
         )
 
-        if cve_summary:
+        for key, value in score_breakdown.items():
 
-            cve_summary_rows = [
-                [
-                    Paragraph(
-                        "<b>Severity</b>",
-                        normal_style
-                    ),
-                    Paragraph(
-                        "<b>Count</b>",
-                        normal_style
-                    ),
-                ]
-            ]
-
-            for key, value in (
-                cve_summary.items()
+            if isinstance(
+                value,
+                (
+                    dict,
+                    list,
+                ),
             ):
-
-                cve_summary_rows.append(
-                    [
-                        Paragraph(
-                            safe(
-                                str(key)
-                                .replace(
-                                    "_",
-                                    " "
-                                )
-                                .title()
-                            ),
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(value),
-                            normal_style
-                        ),
-                    ]
+                value = json.dumps(
+                    value,
+                    default=str,
+                    indent=2,
                 )
-
-            cve_summary_table = Table(
-                cve_summary_rows,
-                colWidths=[
-                    130 * mm,
-                    40 * mm,
-                ],
-                repeatRows=1,
-            )
-
-            cve_summary_table.setStyle(
-                TableStyle(
-                    [
-                        (
-                            "BACKGROUND",
-                            (0, 0),
-                            (-1, 0),
-                            colors.HexColor(
-                                "#0B8F72"
-                            ),
-                        ),
-                        (
-                            "TEXTCOLOR",
-                            (0, 0),
-                            (-1, 0),
-                            colors.white,
-                        ),
-                        (
-                            "GRID",
-                            (0, 0),
-                            (-1, -1),
-                            0.4,
-                            colors.HexColor(
-                                "#A5C8BE"
-                            ),
-                        ),
-                        (
-                            "ALIGN",
-                            (1, 0),
-                            (1, -1),
-                            "CENTER",
-                        ),
-                    ]
-                )
-            )
-
-            story.append(
-                cve_summary_table
-            )
-
-        if network_vulnerabilities:
 
             story.append(
                 Paragraph(
-                    "Detected Vulnerabilities",
-                    subheading_style
+                    f"<b>{safe(key)}</b>: "
+                    f"{safe(value)}",
+                    normal_style,
                 )
             )
 
-            for index, vulnerability in enumerate(
-                network_vulnerabilities,
-                start=1
-            ):
+    # ========================================================
+    # 23. RECOMMENDED ACTIONS
+    # ========================================================
 
-                if not isinstance(
-                    vulnerability,
-                    dict
-                ):
-                    continue
+    story.append(
+        Paragraph(
+            "7. Recommended Actions",
+            heading_style,
+        )
+    )
 
-                vulnerability_rows = [
-                    [
-                        Paragraph(
-                            "<b>CVE ID</b>",
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                vulnerability.get(
-                                    "cve_id",
-                                    vulnerability.get(
-                                        "id",
-                                        "N/A"
-                                    )
-                                )
-                            ),
-                            normal_style
-                        ),
-                    ],
-                    [
-                        Paragraph(
-                            "<b>Title</b>",
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                vulnerability.get(
-                                    "title",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                    ],
-                    [
-                        Paragraph(
-                            "<b>Severity</b>",
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                vulnerability.get(
-                                    "severity",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                    ],
-                    [
-                        Paragraph(
-                            "<b>CVSS Score</b>",
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                vulnerability.get(
-                                    "cvss_score",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                    ],
-                    [
-                        Paragraph(
-                            "<b>Affected Product</b>",
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                vulnerability.get(
-                                    "affected_product",
-                                    vulnerability.get(
-                                        "cpe_name",
-                                        "N/A"
-                                    )
-                                )
-                            ),
-                            normal_style
-                        ),
-                    ],
-                    [
-                        Paragraph(
-                            "<b>Description</b>",
-                            normal_style
-                        ),
-                        Paragraph(
-                            safe(
-                                vulnerability.get(
-                                    "description",
-                                    "N/A"
-                                )
-                            ),
-                            normal_style
-                        ),
-                    ],
-                ]
+    recommendations = []
 
-                vulnerability_table = Table(
-                    vulnerability_rows,
-                    colWidths=[
-                        40 * mm,
-                        130 * mm,
-                    ],
+    for finding in web_findings:
+
+        if not isinstance(
+            finding,
+            dict,
+        ):
+            continue
+
+        recommendation = finding.get(
+            "recommendation"
+        )
+
+        if recommendation and (
+            recommendation
+            not in recommendations
+        ):
+            recommendations.append(
+                recommendation
+            )
+
+    for vulnerability in vulnerabilities:
+
+        if not isinstance(
+            vulnerability,
+            dict,
+        ):
+            continue
+
+        recommendation = vulnerability.get(
+            "recommendation"
+        )
+
+        if recommendation and (
+            recommendation
+            not in recommendations
+        ):
+            recommendations.append(
+                recommendation
+            )
+
+    if recommendations:
+
+        for index, recommendation in enumerate(
+            recommendations,
+            start=1,
+        ):
+            story.append(
+                Paragraph(
+                    f"{index}. "
+                    f"{safe(recommendation)}",
+                    normal_style,
                 )
+            )
 
-                vulnerability_table.setStyle(
-                    TableStyle(
-                        [
-                            (
-                                "BACKGROUND",
-                                (0, 0),
-                                (0, -1),
-                                colors.HexColor(
-                                    "#E8F3F0"
-                                ),
-                            ),
-                            (
-                                "GRID",
-                                (0, 0),
-                                (-1, -1),
-                                0.4,
-                                colors.HexColor(
-                                    "#A5C8BE"
-                                ),
-                            ),
-                            (
-                                "VALIGN",
-                                (0, 0),
-                                (-1, -1),
-                                "TOP",
-                            ),
-                        ]
-                    )
-                )
+    else:
 
-                story.append(
-                    vulnerability_table
-                )
+        if vulnerabilities:
 
-                story.append(
-                    Spacer(
-                        1,
-                        5 * mm
-                    )
+            story.append(
+                Paragraph(
+                    "No per-CVE remediation text was stored with "
+                    "the scan. Review each affected software "
+                    "version against the corresponding vendor "
+                    "security advisory and the NVD references "
+                    "listed in the CVE section.",
+                    normal_style,
                 )
+            )
+
+        else:
+
+            story.append(
+                Paragraph(
+                    "No explicit remediation recommendations were returned by the scanners.",
+                    normal_style,
+                )
+            )
 
     # ========================================================
-    # 7. OVERALL ASSESSMENT
+    # 24. REPORT CONCLUSION
     # ========================================================
 
     story.append(
@@ -4465,191 +5855,61 @@ def download_scan_report_pdf(
 
     story.append(
         Paragraph(
-            "7. Overall Security Assessment",
-            heading_style
-        )
-    )
-
-    assessment_text = (
-        f"The assessment of "
-        f"<b>{safe(target)}</b> "
-        f"resulted in a security score of "
-        f"<b>{safe(score)}/100</b>, "
-        f"grade <b>{safe(grade)}</b>, "
-        f"and risk classification "
-        f"<b>{safe(risk)}</b>. "
-        f"A total of "
-        f"<b>{safe(total)}</b> "
-        f"finding(s) were identified."
-    )
-
-    story.append(
-        Paragraph(
-            assessment_text,
-            normal_style
-        )
-    )
-
-    story.append(
-        Spacer(
-            1,
-            5 * mm
+            "8. Assessment Conclusion",
+            heading_style,
         )
     )
 
     story.append(
         Paragraph(
-            "Recommended Actions",
-            subheading_style
+            f"The CyberGuard assessment for "
+            f"<b>{safe(target)}</b> completed with a "
+            f"security score of <b>{safe(score)}/100</b>, "
+            f"grade <b>{safe(grade)}</b>, and risk level "
+            f"<b>{safe(risk)}</b>. The report contains "
+            f"<b>{safe(len(vulnerabilities))}</b> CVE record(s) "
+            f"and <b>{safe(len(web_findings))}</b> web finding(s), "
+            f"for <b>{safe(len(vulnerabilities) + len(web_findings))}</b> "
+            f"combined finding(s).",
+            normal_style,
         )
     )
 
-    recommendations = []
-
-    for finding in all_findings:
-
-        recommendation = finding.get(
-            "recommendation"
+    story.append(
+        Paragraph(
+            "This PDF contains the scan information returned by CyberGuard, including the network discovery, CPE inventory, CVE records, web checks, security-header results, and remediation information available at the time of assessment.",
+            normal_style,
         )
-
-        if recommendation:
-
-            recommendation_text = str(
-                recommendation
-            )
-
-            if recommendation_text not in recommendations:
-                recommendations.append(
-                    recommendation_text
-                )
-
-    if recommendations:
-
-        for index, recommendation in enumerate(
-            recommendations,
-            start=1
-        ):
-
-            story.append(
-                Paragraph(
-                    f"{index}. "
-                    f"{safe(recommendation)}",
-                    normal_style
-                )
-            )
-
-    else:
-
-        story.append(
-            Paragraph(
-                "No remediation actions are required "
-                "based on the findings returned by this scan.",
-                normal_style
-            )
-        )
+    )
 
     # ========================================================
-    # 8. REPORT CONCLUSION
+    # 25. FOOTER INFO
     # ========================================================
 
     story.append(
         Spacer(
             1,
-            8 * mm
+            12 * mm,
         )
     )
-
-    story.append(
-        Paragraph(
-            "Conclusion",
-            subheading_style
-        )
-    )
-
-    if total == 0:
-
-        conclusion = (
-            "No security findings were returned by "
-            "the assessment. The target should still "
-            "be periodically reassessed because the "
-            "security posture can change over time."
-        )
-
-    elif str(risk).lower() in (
-        "critical",
-        "high"
-    ):
-
-        conclusion = (
-            "The assessment identified significant "
-            "security weaknesses that should be "
-            "prioritized for remediation. The most "
-            "severe findings should be addressed first, "
-            "followed by validation scans to confirm "
-            "that the identified issues have been resolved."
-        )
-
-    elif str(risk).lower() in (
-        "moderate",
-        "medium"
-    ):
-
-        conclusion = (
-            "The assessment identified security "
-            "weaknesses requiring remediation. "
-            "The recommended actions should be "
-            "implemented and the target reassessed "
-            "after remediation."
-        )
-
-    else:
-
-        conclusion = (
-            "The assessment identified relatively "
-            "limited security exposure based on the "
-            "checks performed. Continued monitoring "
-            "and periodic security assessments are "
-            "recommended."
-        )
-
-    story.append(
-        Paragraph(
-            conclusion,
-            normal_style
-        )
-    )
-
-    # ========================================================
-    # 9. REPORT FOOTER INFORMATION
-    # ========================================================
-
-    story.append(
-        Spacer(
-            1,
-            15 * mm
-        )
-    )
-
-    generated_at = datetime.utcnow().isoformat()
 
     story.append(
         Paragraph(
             f"Report generated by CyberGuard on "
-            f"{safe(generated_at)} UTC.",
-            small_style
+            f"{safe(datetime.utcnow().isoformat())} UTC.",
+            small_style,
         )
     )
 
     story.append(
         Paragraph(
-            "This report is intended for authorized "
-            "security assessment and remediation purposes.",
-            small_style
+            "For authorized security assessment and remediation purposes only.",
+            small_style,
         )
     )
 
     # ========================================================
-    # 10. BUILD PDF
+    # 26. BUILD
     # ========================================================
 
     document.build(
@@ -4659,10 +5919,6 @@ def download_scan_report_pdf(
     )
 
     buffer.seek(0)
-
-    # ========================================================
-    # 11. RETURN PDF
-    # ========================================================
 
     filename = (
         f"{scan_id_value}-CyberGuard-Report.pdf"
