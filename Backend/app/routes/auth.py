@@ -26,9 +26,12 @@ from app.security.session import (
     generate_session_token,
     hash_session_token,
 )
+
 load_dotenv()
+
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "").strip().lower()
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+
 router = APIRouter(
     prefix="/api/auth",
     tags=["Authentication"]
@@ -126,6 +129,7 @@ def register(
 
     return user
 
+
 # ============================================================
 # LOGIN
 # ============================================================
@@ -133,6 +137,8 @@ def register(
 SESSION_COOKIE_NAME = "cyberguard_session"
 
 SESSION_DURATION_DAYS = 7
+
+
 # ============================================================
 # LOGIN RATE LIMITING
 # ============================================================
@@ -141,6 +147,7 @@ MAX_LOGIN_ATTEMPTS = 5
 LOGIN_BLOCK_DURATION = 15 * 60  # 15 minutes
 
 login_attempts = {}
+
 
 @router.post("/login")
 def login(
@@ -274,6 +281,8 @@ def login(
             "phone": user.phone,
         },
     }
+
+
 # ============================================================
 # GET CURRENT USER
 # ============================================================
@@ -343,6 +352,7 @@ def get_current_user(
 
     return user
 
+
 # ============================================================
 # CURRENT USER
 # ============================================================
@@ -361,6 +371,7 @@ def get_me(
         "phone": current_user.phone,
         "role": current_user.role,
     }
+
 
 # ============================================================
 # LOGOUT
