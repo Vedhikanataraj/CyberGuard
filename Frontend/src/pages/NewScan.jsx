@@ -880,10 +880,10 @@ function FullScanReport({ result, target, onReset }) {
     network.open_ports ||
     result.open_ports ||
     [];
-  const vulnerabilities =
-    network.vulnerabilities ||
-    result.vulnerabilities ||
-    [];
+  const vulnerabilities = pickNonEmptyArray(
+    network.vulnerabilities,
+    result.vulnerabilities,
+  );
   const cveSummary =
     network.cve_summary ||
     result.cve_summary ||
@@ -1007,12 +1007,20 @@ function FullScanReport({ result, target, onReset }) {
       <VulnerabilitySection
         vulnerabilities={vulnerabilities}
         summary={cveSummary}
+        assessment={buildCveAssessment(
+          result,
+          vulnerabilities,
+          openPorts
+        )}
       />
 
       {web && (
         <WebDetailsSection
           web={web}
-          findings={result.web_findings || web.findings || []}
+          findings={pickNonEmptyArray(
+            result.web_findings,
+            web.findings,
+          )}
         />
       )}
 
@@ -1022,10 +1030,10 @@ function FullScanReport({ result, target, onReset }) {
 }
 
 function WebScanReport({ result, target, onReset }) {
-  const findings =
-    result.web_scan?.findings ||
-    result.findings ||
-    [];
+  const findings = pickNonEmptyArray(
+    result.web_scan?.findings,
+    result.findings,
+  );
 
   const summary = result.summary || buildFindingSummary(findings);
 
@@ -1282,6 +1290,11 @@ function PortScanReport({ result, target, onReset }) {
       <VulnerabilitySection
         vulnerabilities={vulnerabilities}
         summary={summary}
+        assessment={buildCveAssessment(
+          result,
+          vulnerabilities,
+          ports
+        )}
       />
 
       {result.cve_error && (
@@ -1332,29 +1345,51 @@ function OpenPortsSection({ ports }) {
         {ports.map((port, index) => (
           <div
             key={`${port.port}-${port.protocol}-${index}`}
-            className="flex flex-col gap-3 px-6 py-4 sm:flex-row sm:items-center sm:justify-between"
+            className="px-6 py-5"
           >
-            <div className="flex items-center gap-4">
-              <span className="rounded-md bg-[#04120E] px-3 py-1 font-mono text-sm text-[#00E39A]">
-                {port.port}
-              </span>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex items-start gap-4">
+                <span className="rounded-md bg-[#04120E] px-3 py-1 font-mono text-sm text-[#00E39A]">
+                  {port.port}
+                </span>
 
-              <div>
-                <p className="text-sm text-white">
-                  {port.service || "Unknown service"}
-                </p>
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white">
+                    {port.service || "Unknown service"}
+                  </p>
 
-                <p className="mt-1 text-xs text-[#67927E]">
-                  {port.product || "Product unknown"}
-                  {" • "}
-                  {port.protocol?.toUpperCase() || "TCP"}
-                </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <span className="rounded-md border border-[#0B3B2B] bg-[#04120E] px-2 py-1 text-[10px] text-[#8FBDA9]">
+                      Product: {port.product || "Not identified"}
+                    </span>
+
+                    <span className="rounded-md border border-[#0B3B2B] bg-[#04120E] px-2 py-1 font-mono text-[10px] text-[#8FBDA9]">
+                      Version: {port.version || "Not disclosed"}
+                    </span>
+
+                    <span className="rounded-md border border-[#0B3B2B] bg-[#04120E] px-2 py-1 text-[10px] text-[#8FBDA9]">
+                      {port.protocol?.toUpperCase() || "TCP"}
+                    </span>
+                  </div>
+
+                  {port.cpe && (
+                    <p className="mt-2 break-all font-mono text-[10px] text-[#39F0A8]">
+                      CPE: {port.cpe}
+                    </p>
+                  )}
+
+                  {port.extra_info && (
+                    <p className="mt-2 break-words text-xs leading-5 text-[#67927E]">
+                      {port.extra_info}
+                    </p>
+                  )}
+                </div>
               </div>
-            </div>
 
-            <span className="text-xs font-medium text-green-400">
-              {port.state || "open"}
-            </span>
+              <span className="shrink-0 rounded-md border border-green-500/20 bg-green-500/10 px-2.5 py-1 text-xs font-medium text-green-400">
+                {port.state || "open"}
+              </span>
+            </div>
           </div>
         ))}
       </div>
@@ -1362,7 +1397,11 @@ function OpenPortsSection({ ports }) {
   );
 }
 
-function VulnerabilitySection({ vulnerabilities, summary }) {
+function VulnerabilitySection({
+  vulnerabilities,
+  summary,
+  assessment,
+}) {
   return (
     <div className="mt-5 rounded-xl border border-[#0B3B2B] bg-[#061A13]">
       <div className="border-b border-[#0B3B2B] px-6 py-5">
@@ -1373,7 +1412,7 @@ function VulnerabilitySection({ vulnerabilities, summary }) {
             </h2>
 
             <p className="mt-1 text-xs text-[#67927E]">
-              CVEs identified during the assessment.
+              CPE resolution, CVE mapping status and vulnerability details.
             </p>
           </div>
 
@@ -1383,11 +1422,13 @@ function VulnerabilitySection({ vulnerabilities, summary }) {
         </div>
       </div>
 
+      <CveAssessmentDetails assessment={assessment} />
+
       <div className="divide-y divide-[#083222]">
         {vulnerabilities.length === 0 ? (
           <div className="px-6 py-6">
             <p className="text-sm text-[#5E8A76]">
-              No CVE vulnerabilities were returned.
+              No CVE vulnerabilities were mapped for this assessment.
             </p>
           </div>
         ) : (
@@ -1408,9 +1449,9 @@ function VulnerabilitySection({ vulnerabilities, summary }) {
                     </p>
                   )}
 
-                  {vulnerability.affected_product && (
-                    <p className="mt-1 font-mono text-[10px] text-[#67927E]">
-                      {vulnerability.affected_product}
+                  {(vulnerability.affected_product || vulnerability.cpe_name) && (
+                    <p className="mt-1 break-all font-mono text-[10px] text-[#67927E]">
+                      {vulnerability.affected_product || vulnerability.cpe_name}
                     </p>
                   )}
                 </div>
@@ -1431,8 +1472,6 @@ function VulnerabilitySection({ vulnerabilities, summary }) {
           )
         )}
       </div>
-
-      
     </div>
   );
 }
@@ -1508,30 +1547,386 @@ function FindingList({ findings }) {
 
 function WebDetailsSection({ web, findings }) {
   return (
-    <div className="mt-5 rounded-xl border border-[#0B3B2B] bg-[#061A13] p-6">
-      <h2 className="font-semibold text-white">
-        Web Security Details
-      </h2>
+    <div className="mt-5 rounded-xl border border-[#0B3B2B] bg-[#061A13]">
+      <div className="border-b border-[#0B3B2B] px-6 py-5">
+        <h2 className="font-semibold text-white">
+          Web Security Details
+        </h2>
 
-      <div className="mt-5 grid gap-5 sm:grid-cols-2">
+        <p className="mt-1 text-xs text-[#67927E]">
+          HTTP response information and each web security finding returned by the scanner.
+        </p>
+      </div>
+
+      <div className="p-6">
+        <div className="grid gap-5 sm:grid-cols-2">
+          <InfoItem
+            label="HTTP Status"
+            value={web.status_code ?? "Unknown"}
+          />
+
+          <InfoItem
+            label="Final URL"
+            value={web.final_url || "Unknown"}
+          />
+        </div>
+
+        <div className="mt-5">
+          <p className="text-xs text-[#67927E]">
+            Web Findings
+          </p>
+
+          <p className="mt-1 text-sm font-semibold text-white">
+            {findings.length}
+          </p>
+        </div>
+
+        {findings.length === 0 ? (
+          <p className="mt-5 text-sm text-[#5E8A76]">
+            No web security findings were returned.
+          </p>
+        ) : (
+          <div className="mt-5 divide-y divide-[#083222] rounded-xl border border-[#0B3B2B] bg-[#04120E]">
+            {findings.map((finding, index) => (
+              <div
+                key={`${finding.title || "finding"}-${index}`}
+                className="p-5"
+              >
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-white">
+                      {finding.title || `Finding ${index + 1}`}
+                    </p>
+
+                    {finding.category && (
+                      <p className="mt-1 text-[10px] uppercase tracking-wider text-[#67927E]">
+                        {finding.category}
+                      </p>
+                    )}
+                  </div>
+
+                  <SeverityBadge severity={finding.severity} />
+                </div>
+
+                {finding.description && (
+                  <p className="mt-3 text-xs leading-6 text-[#729B87]">
+                    {finding.description}
+                  </p>
+                )}
+
+                {finding.recommendation && (
+                  <div className="mt-3 rounded-lg border border-[#0B3B2B] bg-[#000B08] p-3">
+                    <p className="text-[10px] uppercase tracking-wider text-[#67927E]">
+                      Recommendation
+                    </p>
+
+                    <p className="mt-1 text-xs leading-5 text-[#8FBDA9]">
+                      {finding.recommendation}
+                    </p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function getCveAssessmentSource(result) {
+  return (
+    result?.cve_assessment ||
+    result?.network_scan?.cve_assessment ||
+    result?.cve_analysis ||
+    result?.network_scan?.cve_analysis ||
+    {}
+  );
+}
+
+function getDetectedServerHeader(ports, source) {
+  const direct =
+    source?.detected_server_header ||
+    source?.server_header ||
+    source?.server ||
+    source?.http_server_header;
+
+  if (direct) return String(direct);
+
+  for (const port of ports || []) {
+    const candidates = [
+      port?.server_header,
+      port?.http_server_header,
+      port?.httpServerHeader,
+      port?.extra_info,
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const match = String(candidate).match(/server\s*:\s*([^\r\n;]+)/i);
+      if (match?.[1]) return match[1].trim();
+    }
+  }
+
+  return "";
+}
+
+function buildCveAssessment(result, vulnerabilities = [], ports = []) {
+  const source = getCveAssessmentSource(result);
+  const network = result?.network_scan || {};
+
+  const cpeRecords = pickNonEmptyArray(
+    result?.cpe_records,
+    network?.cpe_records
+  );
+
+  const firstCpe = cpeRecords.find((record) => record?.cpe);
+
+  const cpe =
+    source?.cpe ||
+    source?.resolved_cpe ||
+    source?.resolvedCpe ||
+    firstCpe?.cpe ||
+    network?.cpe ||
+    null;
+
+  const likelyHttpPort = (ports || []).find(
+    (port) =>
+      Number(port?.port) === 80 ||
+      Number(port?.port) === 443 ||
+      String(port?.service || "")
+        .toLowerCase()
+        .includes("http")
+  );
+
+  const detectedServerHeader = getDetectedServerHeader(
+    ports,
+    source
+  );
+
+  const detectedProduct =
+    source?.product ||
+    source?.product_name ||
+    source?.productName ||
+    likelyHttpPort?.product ||
+    "";
+
+  const detectedVersion =
+    source?.version ||
+    source?.product_version ||
+    source?.productVersion ||
+    likelyHttpPort?.version ||
+    "";
+
+  const hasCve = Array.isArray(vulnerabilities) && vulnerabilities.length > 0;
+  const hasCpe = Boolean(cpe);
+
+  const cveError =
+    result?.cve_error ||
+    network?.cve_error ||
+    source?.cve_error ||
+    source?.error ||
+    "";
+
+  let cpeStatus =
+    source?.cpe_status ||
+    source?.cpeStatus ||
+    "";
+
+  let reason =
+    source?.reason ||
+    source?.cpe_reason ||
+    source?.cpeReason ||
+    "";
+
+  let cveMappingStatus =
+    source?.cve_mapping_status ||
+    source?.cveMappingStatus ||
+    "";
+
+  let mappingReason =
+    source?.mapping_reason ||
+    source?.mappingReason ||
+    "";
+
+  let cveResult =
+    source?.cve_result ||
+    source?.cveResult ||
+    "";
+
+  if (!cpeStatus) {
+    cpeStatus = hasCpe ? "Identified" : "Not identified";
+  }
+
+  if (!cveMappingStatus) {
+    if (hasCve) {
+      cveMappingStatus = "Completed";
+    } else if (cveError) {
+      cveMappingStatus = "Not completed";
+    } else if (hasCpe) {
+      cveMappingStatus = "Completed";
+    } else {
+      cveMappingStatus = "Skipped";
+    }
+  }
+
+  if (!reason) {
+    if (cveError) {
+      reason = `CVE lookup could not be completed: ${cveError}`;
+    } else if (hasCpe) {
+      reason =
+        "A reliable CPE was identified from the detected product and version.";
+    } else {
+      const httpsPort = (ports || []).find(
+        (port) =>
+          Number(port?.port) === 443 ||
+          String(port?.service || "")
+            .toLowerCase()
+            .includes("https")
+      );
+
+      const httpPort = (ports || []).find(
+        (port) =>
+          Number(port?.port) === 80 ||
+          String(port?.service || "")
+            .toLowerCase()
+            .includes("http")
+      );
+
+      if (detectedServerHeader && httpsPort) {
+        reason =
+          "Nmap detected HTTPS on port 443, but the server disclosed only a server header and did not provide a reliable product and version for CPE resolution.";
+      } else if (httpsPort) {
+        reason =
+          "Nmap detected HTTPS on port 443, but the scan did not disclose a reliable product and version.";
+      } else if (httpPort) {
+        reason =
+          "Nmap detected HTTP, but the scan did not disclose a reliable product and version.";
+      } else {
+        reason =
+          "No reliable product and version information was available to generate a version-specific CPE.";
+      }
+    }
+  }
+
+  if (!mappingReason) {
+    if (cveMappingStatus === "Skipped") {
+      mappingReason =
+        "A version-specific CPE could not be generated reliably. CyberGuard does not guess a CPE when product/version information is insufficient, to avoid incorrect CVE matches.";
+    } else if (cveError) {
+      mappingReason = String(cveError);
+    } else if (hasCpe) {
+      mappingReason =
+        "The identified CPE was used for NVD vulnerability correlation.";
+    } else {
+      mappingReason = reason;
+    }
+  }
+
+  if (!cveResult) {
+    if (hasCve) {
+      cveResult =
+        `${vulnerabilities.length} CVE${vulnerabilities.length === 1 ? "" : "s"} mapped from the identified CPE.`;
+    } else if (cveError) {
+      cveResult = "CVE mapping could not be completed.";
+    } else if (hasCpe) {
+      cveResult =
+        "No matching CVE records were returned for the identified CPE.";
+    } else {
+      cveResult =
+        "No CVEs were mapped for this asset because a reliable product/version combination was not available.";
+    }
+  }
+
+  return {
+    cpeStatus,
+    cpe,
+    detectedServerHeader,
+    detectedProduct,
+    version: detectedVersion || "Not disclosed",
+    reason,
+    cveMappingStatus,
+    mappingReason,
+    cveResult,
+  };
+}
+
+function CveAssessmentDetails({ assessment }) {
+  return (
+    <div className="border-b border-[#0B3B2B] bg-[#04120E] p-6">
+      <div className="flex items-center gap-3">
+        <ShieldCheck size={17} className="text-[#39F0A8]" />
+        <h3 className="text-sm font-semibold text-white">
+          CVE / CPE Assessment
+        </h3>
+      </div>
+
+      <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <InfoItem
-          label="HTTP Status"
-          value={web.status_code ?? "Unknown"}
+          label="CPE Status"
+          value={assessment?.cpeStatus || "Not identified"}
         />
 
         <InfoItem
-          label="Final URL"
-          value={web.final_url || "Unknown"}
+          label="Version"
+          value={assessment?.version || "Not disclosed"}
+        />
+
+        <InfoItem
+          label="CVE Mapping Status"
+          value={assessment?.cveMappingStatus || "Skipped"}
         />
       </div>
 
-      <div className="mt-5">
-        <p className="text-xs text-[#67927E]">
-          Web Findings
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <InfoItem
+          label="Detected Server Header"
+          value={assessment?.detectedServerHeader || "Not disclosed"}
+        />
+
+        <InfoItem
+          label="Detected Product"
+          value={assessment?.detectedProduct || "Not identified"}
+        />
+      </div>
+
+      <div className="mt-4">
+        <InfoItem
+          label="CPE"
+          value={assessment?.cpe || "Not resolved"}
+        />
+      </div>
+
+      <div className="mt-4 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4">
+        <p className="text-[10px] uppercase tracking-wider text-yellow-300">
+          Why was the CPE/CVE result not found or skipped?
         </p>
 
-        <p className="mt-1 text-sm text-white">
-          {findings.length}
+        <p className="mt-2 text-sm leading-6 text-yellow-100/80">
+          {assessment?.reason ||
+            "A reliable product/version combination was not available."}
+        </p>
+      </div>
+
+      <div className="mt-4 rounded-lg border border-[#0B3B2B] bg-[#000B08] p-4">
+        <p className="text-[10px] uppercase tracking-wider text-[#67927E]">
+          CVE Mapping Reason
+        </p>
+
+        <p className="mt-2 text-sm leading-6 text-[#8FBDA9]">
+          {assessment?.mappingReason ||
+            "A version-specific CPE could not be generated reliably."}
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <p className="text-xs text-[#67927E]">
+          CVE Result
+        </p>
+
+        <p className="mt-1 text-sm leading-6 text-white">
+          {assessment?.cveResult ||
+            "No CVEs were mapped for this asset."}
         </p>
       </div>
     </div>
@@ -1653,6 +2048,16 @@ function ReportActions({ onReset }) {
       </button>
     </div>
   );
+}
+
+function pickNonEmptyArray(...candidates) {
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) {
+      return candidate;
+    }
+  }
+
+  return [];
 }
 
 function buildFindingSummary(findings) {

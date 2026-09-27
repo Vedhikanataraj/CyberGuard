@@ -400,24 +400,23 @@ async function downloadReportPdf() {
       ? scan.web_scan
       : {};
 
-  const networkVulnerabilities =
-    Array.isArray(scan.vulnerabilities)
-      ? scan.vulnerabilities
-      : Array.isArray(network.vulnerabilities)
-      ? network.vulnerabilities
-      : [];
+  const networkVulnerabilities = pickNonEmptyArray(
+    scan.vulnerabilities,
+    network.vulnerabilities,
+    scan.cve_vulnerabilities,
+    network.cve_vulnerabilities
+  );
 
   const storedFindings =
     Array.isArray(scan.findings)
       ? scan.findings
       : [];
 
-  const webFindings =
-    Array.isArray(scan.web_findings)
-      ? scan.web_findings
-      : Array.isArray(webScan.findings)
-      ? webScan.findings
-      : [];
+  const webFindings = pickNonEmptyArray(
+    scan.web_findings,
+    webScan.findings,
+    scan.findings
+  );
 
   const findings = [
     ...storedFindings,
@@ -445,22 +444,25 @@ async function downloadReportPdf() {
     );
   });
 
-  const openPorts =
-    Array.isArray(scan.open_ports)
-      ? scan.open_ports
-      : Array.isArray(network.open_ports)
-      ? network.open_ports
-      : [];
+  const openPorts = pickNonEmptyArray(
+    scan.open_ports,
+    network.open_ports
+  );
 
   const osDetection =
     scan.os_detection || network.os_detection || {};
 
-  const cpeRecords =
-    Array.isArray(scan.cpe_records)
-      ? scan.cpe_records
-      : Array.isArray(network.cpe_records)
-      ? network.cpe_records
-      : [];
+  const cpeRecords = pickNonEmptyArray(
+    scan.cpe_records,
+    network.cpe_records
+  );
+
+  const cveAssessment = buildCveAssessment(
+    scan,
+    networkVulnerabilities,
+    openPorts,
+    cpeRecords
+  );
 
   const addresses =
     Array.isArray(scan.addresses)
@@ -1076,12 +1078,15 @@ async function downloadReportPdf() {
           </div>
         </div>
 
+        <CveAssessmentDetails assessment={cveAssessment} />
+
         <div className="divide-y divide-[#0E2C23]">
 
           {networkVulnerabilities.length === 0 ? (
-            <div className="flex min-h-[160px] items-center justify-center px-6">
+            <div className="px-6 py-6">
               <p className="text-sm text-[#557A6D]">
-                No CVE vulnerabilities were returned for this assessment.
+                {cveAssessment?.cveResult ||
+                  "No CVEs were mapped for this assessment."}
               </p>
             </div>
           ) : (
@@ -1620,6 +1625,329 @@ async function downloadReportPdf() {
   );
 }
 
+
+// ============================================================
+// CVE / CPE DISCLOSURE HELPERS
+// ============================================================
+
+function pickNonEmptyArray(...candidates) {
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length > 0) {
+      return candidate;
+    }
+  }
+
+  return [];
+}
+
+function getCveAssessmentSource(result) {
+  return (
+    result?.cve_assessment ||
+    result?.network_scan?.cve_assessment ||
+    result?.cve_analysis ||
+    result?.network_scan?.cve_analysis ||
+    result?.vulnerability_analysis ||
+    result?.network_scan?.vulnerability_analysis ||
+    {}
+  );
+}
+
+function getDetectedServerHeader(ports, source) {
+  const direct =
+    source?.detected_server_header ||
+    source?.server_header ||
+    source?.server ||
+    source?.http_server_header;
+
+  if (direct) return String(direct);
+
+  for (const port of ports || []) {
+    const candidates = [
+      port?.server_header,
+      port?.http_server_header,
+      port?.httpServerHeader,
+      port?.extra_info,
+    ];
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const match = String(candidate).match(/server\s*:\s*([^\r\n;]+)/i);
+      if (match?.[1]) return match[1].trim();
+    }
+  }
+
+  return "";
+}
+
+function buildCveAssessment(result, vulnerabilities = [], ports = [], cpeRecords = []) {
+  const source = getCveAssessmentSource(result);
+  const network = result?.network_scan || {};
+
+  const cpeRecordsResolved = pickNonEmptyArray(
+    cpeRecords,
+    result?.cpe_records,
+    network?.cpe_records
+  );
+
+  const firstCpe = cpeRecordsResolved.find((record) => record?.cpe);
+
+  const cpe =
+    source?.cpe ||
+    source?.resolved_cpe ||
+    source?.resolvedCpe ||
+    firstCpe?.cpe ||
+    network?.cpe ||
+    null;
+
+  const likelyHttpPort = (ports || []).find(
+    (port) =>
+      Number(port?.port) === 80 ||
+      Number(port?.port) === 443 ||
+      String(port?.service || "")
+        .toLowerCase()
+        .includes("http")
+  );
+
+  const detectedServerHeader = getDetectedServerHeader(
+    ports,
+    source
+  );
+
+  const detectedProduct =
+    source?.product ||
+    source?.product_name ||
+    source?.productName ||
+    likelyHttpPort?.product ||
+    "";
+
+  const detectedVersion =
+    source?.version ||
+    source?.product_version ||
+    source?.productVersion ||
+    likelyHttpPort?.version ||
+    "";
+
+  const hasCve = Array.isArray(vulnerabilities) && vulnerabilities.length > 0;
+  const hasCpe = Boolean(cpe);
+
+  const cveError =
+    result?.cve_error ||
+    network?.cve_error ||
+    source?.cve_error ||
+    source?.error ||
+    "";
+
+  let cpeStatus =
+    source?.cpe_status ||
+    source?.cpeStatus ||
+    "";
+
+  let reason =
+    source?.reason ||
+    source?.cpe_reason ||
+    source?.cpeReason ||
+    "";
+
+  let cveMappingStatus =
+    source?.cve_mapping_status ||
+    source?.cveMappingStatus ||
+    "";
+
+  let mappingReason =
+    source?.mapping_reason ||
+    source?.mappingReason ||
+    "";
+
+  let cveResult =
+    source?.cve_result ||
+    source?.cveResult ||
+    "";
+
+  if (!cpeStatus) {
+    cpeStatus = hasCpe ? "Identified" : "Not identified";
+  }
+
+  if (!cveMappingStatus) {
+    if (hasCve) {
+      cveMappingStatus = "Completed";
+    } else if (cveError) {
+      cveMappingStatus = "Not completed";
+    } else if (hasCpe) {
+      cveMappingStatus = "Completed";
+    } else {
+      cveMappingStatus = "Skipped";
+    }
+  }
+
+  if (!reason) {
+    if (cveError) {
+      reason = `CVE lookup could not be completed: ${cveError}`;
+    } else if (hasCpe) {
+      reason =
+        "A reliable CPE was identified from the detected product and version.";
+    } else {
+      const httpsPort = (ports || []).find(
+        (port) =>
+          Number(port?.port) === 443 ||
+          String(port?.service || "")
+            .toLowerCase()
+            .includes("https")
+      );
+
+      const httpPort = (ports || []).find(
+        (port) =>
+          Number(port?.port) === 80 ||
+          String(port?.service || "")
+            .toLowerCase()
+            .includes("http")
+      );
+
+      if (detectedServerHeader && httpsPort) {
+        reason =
+          "Nmap detected HTTPS on port 443, but the server disclosed only a server header and did not provide a reliable product and version for CPE resolution.";
+      } else if (httpsPort) {
+        reason =
+          "Nmap detected HTTPS on port 443, but the scan did not disclose a reliable product and version.";
+      } else if (httpPort) {
+        reason =
+          "Nmap detected HTTP, but the scan did not disclose a reliable product and version.";
+      } else {
+        reason =
+          "No reliable product and version information was available to generate a version-specific CPE.";
+      }
+    }
+  }
+
+  if (!mappingReason) {
+    if (cveMappingStatus === "Skipped") {
+      mappingReason =
+        "A version-specific CPE could not be generated reliably. CyberGuard does not guess a CPE when product/version information is insufficient, to avoid incorrect CVE matches.";
+    } else if (cveError) {
+      mappingReason = String(cveError);
+    } else if (hasCpe) {
+      mappingReason =
+        "The identified CPE was used for NVD vulnerability correlation.";
+    } else {
+      mappingReason = reason;
+    }
+  }
+
+  if (!cveResult) {
+    if (hasCve) {
+      cveResult =
+        `${vulnerabilities.length} CVE${vulnerabilities.length === 1 ? "" : "s"} mapped from the identified CPE.`;
+    } else if (cveError) {
+      cveResult = "CVE mapping could not be completed.";
+    } else if (hasCpe) {
+      cveResult =
+        "No matching CVE records were returned for the identified CPE.";
+    } else {
+      cveResult =
+        "No CVEs were mapped for this asset because a reliable product/version combination was not available.";
+    }
+  }
+
+  return {
+    cpeStatus,
+    cpe,
+    detectedServerHeader,
+    detectedProduct,
+    version: detectedVersion || "Not disclosed",
+    reason,
+    cveMappingStatus,
+    mappingReason,
+    cveResult,
+  };
+}
+
+function CveAssessmentDetails({ assessment }) {
+  return (
+    <div className="border-b border-[#12382D] bg-[#04130F] p-6">
+      <div className="flex items-center gap-3">
+        <ShieldCheck size={17} className="text-[#39F0A8]" />
+
+        <div>
+          <h3 className="text-sm font-semibold text-white">
+            CVE / CPE Assessment
+          </h3>
+
+          <p className="mt-1 text-xs text-[#557A6D]">
+            CPE resolution, CVE mapping status and the reason for the result.
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <InfoItem
+          label="CPE Status"
+          value={assessment?.cpeStatus || "Not identified"}
+        />
+
+        <InfoItem
+          label="Version"
+          value={assessment?.version || "Not disclosed"}
+        />
+
+        <InfoItem
+          label="CVE Mapping Status"
+          value={assessment?.cveMappingStatus || "Skipped"}
+        />
+      </div>
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <InfoItem
+          label="Detected Server Header"
+          value={assessment?.detectedServerHeader || "Not disclosed"}
+        />
+
+        <InfoItem
+          label="Detected Product"
+          value={assessment?.detectedProduct || "Not identified"}
+        />
+      </div>
+
+      <div className="mt-4">
+        <InfoItem
+          label="CPE"
+          value={assessment?.cpe || "Not resolved"}
+        />
+      </div>
+
+      <div className="mt-4 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4">
+        <p className="text-[10px] uppercase tracking-wider text-yellow-300">
+          Why was the CPE/CVE result not found or skipped?
+        </p>
+
+        <p className="mt-2 text-sm leading-6 text-yellow-100/80">
+          {assessment?.reason ||
+            "A reliable product/version combination was not available."}
+        </p>
+      </div>
+
+      <div className="mt-4 rounded-lg border border-[#12382D] bg-[#000B08] p-4">
+        <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+          CVE Mapping Reason
+        </p>
+
+        <p className="mt-2 text-sm leading-6 text-[#C7DAD4]">
+          {assessment?.mappingReason ||
+            "A version-specific CPE could not be generated reliably."}
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <p className="text-[10px] uppercase tracking-wider text-[#557A6D]">
+          CVE Result
+        </p>
+
+        <p className="mt-2 text-sm leading-6 text-white">
+          {assessment?.cveResult ||
+            "No CVEs were mapped for this asset."}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 // ============================================================
 // INFO ITEM
