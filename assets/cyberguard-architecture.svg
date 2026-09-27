@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="760" viewBox="0 0 1400 760">
+<defs><linearGradient id="p" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#08211d"/><stop offset="1" stop-color="#061411"/></linearGradient><linearGradient id="l"><stop stop-color="#00e5a8"/><stop offset="1" stop-color="#63ffe8"/></linearGradient></defs>
+<rect width="1400" height="760" fill="#04100f"/>
+<text x="70" y="68" fill="#ddfff8" font-family="Segoe UI,Arial" font-size="34" font-weight="700">CyberGuard — End-to-End Security Architecture</text>
+<g fill="url(#p)" stroke="#16d5b2" stroke-width="2"><rect x="70" y="110" width="1260" height="105" rx="22"/><rect x="70" y="260" width="1260" height="105" rx="22"/><rect x="70" y="410" width="1260" height="105" rx="22"/><rect x="70" y="560" width="1260" height="105" rx="22"/></g>
+<g font-family="Segoe UI,Arial"><g fill="#77ffed" font-size="18" font-weight="700" letter-spacing="2"><text x="105" y="150">01 • CLIENT</text><text x="105" y="300">02 • API + CONTROL</text><text x="105" y="450">03 • SECURITY ANALYSIS</text><text x="105" y="600">04 • DATA + REPORTING</text></g>
+<g fill="#fff" font-size="28" font-weight="700"><text x="105" y="188">React + Vite Security Dashboard</text><text x="105" y="338">FastAPI • Authentication • Validation • Authorization</text><text x="105" y="488">Nmap • Web Scanner • CPE → CVE/CVSS • Risk Engine</text><text x="105" y="638">PostgreSQL / Neon • Assets • Vulnerabilities • PDF Reports</text></g>
+<g fill="#a9d8d0" font-size="17"><text x="700" y="150">Dashboard • New Scan • History • Assets • Vulnerabilities • Reports</text><text x="700" y="300">Sessions • rate limiting • public-target validation • REST endpoints</text><text x="700" y="450">Ports • services • versions • OS • HTTP findings • severity • score</text><text x="700" y="600">User ownership • scan history • findings • downloadable reports</text></g></g>
+<g stroke="url(#l)" stroke-width="5"><path d="M700 215v45M700 365v45M700 515v45"/></g>
+<g fill="#63ffe8"><path d="M700 260l-10-16h20z"/><path d="M700 410l-10-16h20z"/><path d="M700 560l-10-16h20z"/></g>
+</svg>

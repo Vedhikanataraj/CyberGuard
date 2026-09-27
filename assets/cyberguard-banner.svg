@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="420" viewBox="0 0 1400 420">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#041312"/><stop offset=".55" stop-color="#07231f"/><stop offset="1" stop-color="#043b31"/></linearGradient>
+<linearGradient id="a" x1="0" x2="1"><stop stop-color="#00e5a8"/><stop offset="1" stop-color="#55ffe4"/></linearGradient>
+<filter id="g"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<rect width="1400" height="420" rx="28" fill="url(#bg)"/>
+<g opacity=".12" stroke="#6dffe9"><path d="M0 80H1400M0 160H1400M0 240H1400M0 320H1400"/><path d="M140 0V420M280 0V420M420 0V420M560 0V420M700 0V420M840 0V420M980 0V420M1120 0V420M1260 0V420"/></g>
+<g transform="translate(88 82)"><path d="M95 0l83 30v77c0 72-43 117-83 139C55 224 12 179 12 107V30z" fill="none" stroke="url(#a)" stroke-width="7" filter="url(#g)"/><path d="M60 101l25 25 48-55" fill="none" stroke="#8bfff0" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="320" y="115" fill="#75ffeb" font-family="Segoe UI,Arial" font-size="21" letter-spacing="6">WEB • NETWORK • VULNERABILITY INTELLIGENCE</text>
+<text x="320" y="190" fill="#fff" font-family="Segoe UI,Arial" font-size="66" font-weight="700">CYBERGUARD</text>
+<text x="320" y="235" fill="#a9ddd4" font-family="Segoe UI,Arial" font-size="24">Discover. Correlate. Assess. Report.</text>
+<g transform="translate(320 286)" font-family="Segoe UI,Arial" font-size="15" font-weight="600" text-anchor="middle">
+<g fill="#0a372f" stroke="#1bd8b8"><rect width="185" height="52" rx="26"/><rect x="205" width="185" height="52" rx="26"/><rect x="410" width="185" height="52" rx="26"/><rect x="615" width="185" height="52" rx="26"/><rect x="820" width="185" height="52" rx="26"/></g>
+<g fill="#d1fff6"><text x="92" y="33">TARGET VALIDATION</text><text x="297" y="33">NMAP DISCOVERY</text><text x="502" y="33">CPE → CVE</text><text x="707" y="33">RISK ENGINE</text><text x="912" y="33">PDF REPORTS</text></g>
+</g>
+</svg>
